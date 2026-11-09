@@ -13,7 +13,7 @@
   <a href="https://github.com/rbibby53/DHCP_Options_Finder/actions/workflows/ci.yml"><img src="https://github.com/rbibby53/DHCP_Options_Finder/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/rbibby53/DHCP_Options_Finder/releases/latest"><img src="https://img.shields.io/github/v/release/rbibby53/DHCP_Options_Finder?sort=semver" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-informational" alt="Platforms">
-  <img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python 3.9+">
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/rbibby53/DHCP_Options_Finder" alt="License"></a>
 </p>
 
@@ -50,7 +50,7 @@ Grab the build for your OS from the **[latest release](https://github.com/rbibby
 | Windows | `DHCPOptionsFinder-windows-x64.exe` | Double-click. If nothing comes back, right-click and choose **Run as administrator** |
 | macOS (Apple silicon) | `DHCPOptionsFinder-macos-arm64.zip` | Unzip, then `sudo DHCPOptionsFinder.app/Contents/MacOS/DHCPOptionsFinder` |
 | macOS (Intel) | `DHCPOptionsFinder-macos-x64.zip` | Same as above |
-| Linux | `DHCPOptionsFinder-linux-x64.tar.gz` | `tar xzf …` then `sudo ./DHCPOptionsFinder` |
+| Linux | `DHCPOptionsFinder-linux-x64.tar.gz` | `tar xzf …` then `sudo ./DHCPOptionsFinder` (glibc 2.39+: Fedora 40+, Ubuntu 24.04+, Debian 13, RHEL 10) |
 
 CLI-only builds (`dhcpprobe-cli-*`) and `SHA256SUMS.txt` are attached to every release.
 
@@ -66,7 +66,7 @@ pip install -r requirements.txt
 sudo python3 dhcpprobe_gui.py      # Windows: py dhcpprobe_gui.py
 ```
 
-You need Python 3.9+ with Tkinter (Fedora: `sudo dnf install python3-tkinter`, Debian/Ubuntu: `sudo apt install python3-tk`, Homebrew: `brew install python-tk`).
+You need Python 3.11+ with Tkinter (Fedora: `sudo dnf install python3-tkinter`, Debian/Ubuntu: `sudo apt install python3-tk`, Homebrew: `brew install python-tk`).
 
 ### Using it
 
@@ -141,13 +141,13 @@ DHCP Options Finder builds a standard BOOTP/DHCP packet with option 55 (Paramete
 ## Development
 
 ```bash
-pip install -r requirements.txt pytest ruff
+pip install -r requirements-dev.txt
 ruff check .
 python -m pytest                                           # unit tests
 sudo -E DHCPPROBE_LOOPBACK=1 python3 -m pytest tests/test_loopback.py   # real sockets vs a fake server
 ```
 
-CI runs lint plus unit and loopback tests on Windows, macOS and Linux for Python 3.9 and 3.13. Pushing a `v*` tag builds the apps for all platforms and publishes a GitHub Release.
+CI runs lint plus unit and loopback tests on Windows, macOS and Linux against Python 3.11 (oldest supported) and 3.15 (latest). Release builds use Python 3.15. Pushing a `v*` tag builds the apps for all platforms and publishes a GitHub Release.
 
 ## License
 

@@ -4,12 +4,24 @@ version = "0.1.0"
 description = "Query DHCP servers and decode every option they hand out. Cross-platform GUI + CLI."
 readme = "README.md"
 license = "AGPL-3.0-or-later"
-requires-python = ">=3.9"
-dependencies = ["psutil>=5.9"]
+requires-python = ">=3.11"
+dependencies = ["psutil>=7.2"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: System :: Networking",
+]
 
 [tool.ruff]
 line-length = 110
-target-version = "py39"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM"]
