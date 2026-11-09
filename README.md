@@ -147,7 +147,14 @@ python -m pytest                                           # unit tests
 sudo -E DHCPPROBE_LOOPBACK=1 python3 -m pytest tests/test_loopback.py   # real sockets vs a fake server
 ```
 
-CI runs lint plus unit and loopback tests on Windows, macOS and Linux against Python 3.11 (oldest supported) and 3.15 (latest). Release builds use Python 3.15. Pushing a `v*` tag builds the apps for all platforms and publishes a GitHub Release.
+CI runs lint plus unit and loopback tests on Windows, macOS and Linux against Python 3.11 (oldest supported) and 3.15 (latest). Release builds use Python 3.15.
+
+### Releasing
+
+1. In a PR, bump the version in `pyproject.toml` and `__version__` in `dhcpprobe.py`, and move the `[Unreleased]` notes in `CHANGELOG.md` under a new `## [X.Y.Z] - date` heading.
+2. Merge it. The **Release** workflow sees that `vX.Y.Z` doesn't exist yet, builds every platform, creates the tag, and publishes the GitHub Release using the changelog section as release notes.
+
+Merges that don't change the version don't release anything. Running **Release** by hand from the Actions tab builds the apps as downloadable artifacts without publishing.
 
 ## License
 
