@@ -1,0 +1,22 @@
+[project]
+name = "dhcp-options-finder"
+version = "0.1.0"
+description = "Query DHCP servers and decode every option they hand out. Cross-platform GUI + CLI."
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.9"
+dependencies = ["psutil>=5.9"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = ["SIM105", "SIM108", "UP032", "E731"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dhcpprobe", "dhcpprobe_gui", "fakeserver"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

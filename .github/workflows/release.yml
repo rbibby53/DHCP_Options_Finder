@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, os: windows-latest }
+          - { name: macos-arm64, os: macos-latest }
+          - { name: macos-x64,   os: macos-15-intel }
+          - { name: linux-x64,   os: ubuntu-22.04 }   # older glibc = runs on more distros
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pyinstaller pillow pytest
+      - run: python -m pytest -q tests
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name DHCPOptionsFinder \
+            --icon assets/icon.ico --add-data "assets/icon.png;assets" dhcpprobe_gui.py
+          pyinstaller --noconfirm --onefile --name dhcpprobe --icon assets/icon.ico dhcpprobe.py
+          mkdir out
+          cp dist/DHCPOptionsFinder.exe "out/DHCPOptionsFinder-${{ matrix.name }}.exe"
+          cp dist/dhcpprobe.exe "out/dhcpprobe-cli-${{ matrix.name }}.exe"
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --noconfirm --windowed --name DHCPOptionsFinder \
+            --icon assets/icon.png --add-data "assets/icon.png:assets" \
+            --osx-bundle-identifier dev.bibby.dhcpoptionsfinder dhcpprobe_gui.py
+          pyinstaller --noconfirm --onefile --name dhcpprobe dhcpprobe.py
+          mkdir out
+          ditto -c -k --keepParent dist/DHCPOptionsFinder.app "out/DHCPOptionsFinder-${{ matrix.name }}.zip"
+          tar -czf "out/dhcpprobe-cli-${{ matrix.name }}.tar.gz" -C dist dhcpprobe
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name DHCPOptionsFinder \
+            --add-data "assets/icon.png:assets" dhcpprobe_gui.py
+          pyinstaller --noconfirm --onefile --name dhcpprobe dhcpprobe.py
+          mkdir out
+          tar -czf "out/DHCPOptionsFinder-${{ matrix.name }}.tar.gz" -C dist DHCPOptionsFinder
+          tar -czf "out/dhcpprobe-cli-${{ matrix.name }}.tar.gz" -C dist dhcpprobe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DHCPOptionsFinder-${{ matrix.name }}
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Checksums
+        run: cd out && sha256sum * > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          generate_release_notes: true
