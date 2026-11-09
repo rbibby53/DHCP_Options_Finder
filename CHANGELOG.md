@@ -4,6 +4,9 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Removed
+- Intel Mac (macOS x64) builds. Releases now ship macOS Apple silicon only; v0.1.0 is the last release with an Intel build. Running from source on an Intel Mac still works but isn't tested.
+
 ## [0.1.0] - 2026-11-09
 
 First release.
