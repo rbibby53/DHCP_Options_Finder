@@ -19,7 +19,7 @@ import struct
 import sys
 import time
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 MAGIC = b"\x63\x82\x53\x63"
 SO_BINDTODEVICE = 25
@@ -77,6 +77,7 @@ OPTIONS = {
     125: ("Vendor-Identifying Vendor Specific", "opt125"),
     128: ("PXE: TFTP Server / Etherboot", "hex"), 129: ("PXE: Call Server", "hex"),
     138: ("CAPWAP Access Controllers", "ips"), 150: ("TFTP Server Address (Cisco)", "ips"),
+    160: ("Provisioning Server URL (Polycom)", "str"),
     176: ("Avaya IP Telephone", "str"), 208: ("PXELINUX Magic", "hex"),
     209: ("PXELINUX Config File", "str"), 210: ("PXELINUX Path Prefix", "str"),
     211: ("PXELINUX Reboot Time", "time"), 212: ("6rd", "hex"),
@@ -167,11 +168,83 @@ def _sub_value(v):
     if s is not None and s.strip("\x00"):
         return s.rstrip("\x00")
     if len(v) == 4:
-        return f"{_ip(v)} (0x{v.hex()})"
+        n, ip = struct.unpack("!I", v)[0], _ip(v)
+        # Small values are almost always numbers (VLAN IDs, flags); others usually addresses.
+        return f"{n} (or IP {ip})" if v[0] == 0 else f"{ip} (or {n})"
     return f"0x{v.hex()}"
 
 
-def decode(code, data):
+MSFT43 = {1: "Disable NetBIOS over TCP/IP", 2: "Release lease on shutdown",
+          3: "Default router metric base"}
+
+
+def decode_vendor43(d, vendor_class=None):
+    """Option 43 is vendor-defined. Recognise common layouts; fall back to TLV/text/hex.
+
+    Returns a list: first line is the headline, raw hex is always last.
+    """
+    vc = (vendor_class or "").strip()
+    raw = f"raw: 0x{d.hex()}"
+    try:
+        subs = _tlv(d)
+    except ValueError:
+        subs = None
+    sd = dict(subs or [])
+
+    # Siemens/Unify OpenStage/OpenScape: 1=vendor tag "Siemens", 2=voice VLAN (u32), 3=DLS URL
+    if sd.get(1, b"").rstrip(b"\x00") == b"Siemens" or vc.startswith("OptiIpPhone"):
+        out = ["Siemens/Unify phone provisioning"]
+        for c, v in subs or []:
+            if c == 1:
+                out.append(f"Vendor tag: {_str_or_hex(v)}")
+            elif c == 2 and len(v) == 4:
+                out.append(f"Voice VLAN ID: {struct.unpack('!I', v)[0]}")
+            elif c == 3:
+                out.append(f"DLS server: {_str_or_hex(v)}")
+            else:
+                out.append(f"sub {c}: {_sub_value(v)}")
+        return out + [raw]
+
+    # Cisco lightweight APs: type 0xF1 = list of WLC management IPs
+    if subs and len(sd.get(241, b"")) % 4 == 0 and sd.get(241):
+        wlcs = [_ip(sd[241][i:i + 4]) for i in range(0, len(sd[241]), 4)]
+        out = ["Cisco AP controller list"] + [f"WLC: {w}" for w in wlcs]
+        out += [f"sub {c}: {_sub_value(v)}" for c, v in subs if c != 241]
+        return out + [raw]
+
+    # Ubiquiti UniFi: sub 1 = controller IP
+    if vc.lower().startswith("ubnt") and len(sd.get(1, b"")) == 4:
+        return ["UniFi controller", f"Controller: {_ip(sd[1])}"] + [raw]
+
+    # Microsoft vendor options (vendor class "MSFT 5.0")
+    if vc.startswith("MSFT") and subs:
+        out = ["Microsoft vendor options"]
+        for c, v in subs:
+            val = struct.unpack("!I", v)[0] if len(v) == 4 else None
+            if c in (1, 2) and val is not None:
+                out.append(f"{MSFT43[c]}: {'yes' if val else 'no'} ({val})")
+            elif c in MSFT43 and val is not None:
+                out.append(f"{MSFT43[c]}: {val}")
+            else:
+                out.append(f"sub {c}: {_sub_value(v)}")
+        return out + [raw]
+
+    # Plain text payloads (Aruba controllers, Mitel/Avaya provisioning strings)
+    text = _printable(d)
+    if text and text.strip("\x00") and not subs:
+        text = text.rstrip("\x00")
+        if vc.startswith("ArubaInstantAP"):
+            return ["Aruba Instant AP", f"Group,IP,key: {text}", raw]
+        if vc.startswith("ArubaAP"):
+            return ["Aruba controller", f"Controller: {text}", raw]
+        return [text, raw]
+
+    if subs:
+        return [f"sub {c}: {_sub_value(v)}" for c, v in subs] + [raw]
+    return [f"0x{d.hex()}"]
+
+
+def decode(code, data, vendor_class=None):
     """Return a human-readable value (str or list[str])."""
     kind = OPTIONS.get(code, (None, "auto"))[1]
     d = bytes(data)
@@ -242,14 +315,7 @@ def decode(code, data):
                 i += 5 + ln
             return out
         if kind == "vendor43":
-            # Opaque by spec. Show raw, and a TLV breakdown if it parses cleanly.
-            raw = f"0x{d.hex()}"
-            s = _printable(d)
-            try:
-                subs = _tlv(d)
-                return [raw] + [f"sub {c}: {_sub_value(v)}" for c, v in subs]
-            except ValueError:
-                return [raw] + ([f"ascii: {s}"] if s else [])
+            return decode_vendor43(d, vendor_class)
     except Exception:
         pass
     # Unknown option or length mismatch: best-effort.
@@ -331,7 +397,9 @@ def build_packet(mode, xid, mac, ciaddr, prl, vendor_class, hostname, broadcast)
 # ---------------------------------------------------------------- host info
 
 class ProbeError(Exception):
-    pass
+    def __init__(self, msg, permission=False):
+        super().__init__(msg)
+        self.permission = permission
 
 
 def _psutil():
@@ -467,7 +535,8 @@ def _open_socket(iface):
             bind_ip = iface["ip"]
     except PermissionError:
         s.close()
-        raise ProbeError("Permission denied binding to the interface. Run as root/sudo.") from None
+        raise ProbeError("Permission denied binding to the interface. Run as root/sudo.",
+                         permission=True) from None
     except ProbeError:
         s.close()
         raise
@@ -475,7 +544,8 @@ def _open_socket(iface):
         s.bind((bind_ip, 68))
     except PermissionError:
         s.close()
-        raise ProbeError("Permission denied on UDP/68. Run as root (sudo) or Administrator.") from None
+        raise ProbeError("Permission denied on UDP/68. Run as root (sudo) or Administrator.",
+                         permission=True) from None
     except OSError as e:
         s.close()
         raise ProbeError(f"Can't bind UDP/68 ({e}). Another DHCP client may own the port "
@@ -485,15 +555,25 @@ def _open_socket(iface):
 
 def probe(iface=None, mode="discover", mac=None, vendor_class=None, hostname=None,
           request=None, server=None, server_port=67, ciaddr=None, timeout=5.0,
-          first=False, broadcast_flag=True, log=None):
-    """Send one DISCOVER/INFORM and return a list of parsed replies."""
+          first=False, broadcast_flag=True, log=None, use_iface_mac=False):
+    """Send one DISCOVER/INFORM and return a list of parsed replies.
+
+    MAC used: `mac` if given; otherwise a random one for DISCOVER (so an existing lease
+    on this computer doesn't skew the offer), or the interface MAC for INFORM or when
+    `use_iface_mac` is set.
+    """
     log = log or (lambda m: None)
     if isinstance(iface, str):
         iface = get_interface(iface)
     iface = iface or default_interface()
     if not iface:
         raise ProbeError("No usable network interface found.")
-    mac = mac or bytes.fromhex(iface["mac"].replace(":", ""))
+    if mac:
+        mac_source = "custom"
+    elif mode == "discover" and not use_iface_mac:
+        mac, mac_source = parse_mac("random"), "random"
+    else:
+        mac, mac_source = bytes.fromhex(iface["mac"].replace(":", "")), "interface"
     request = request or list(range(1, 255))
     ci = "0.0.0.0"
     if mode == "inform":
@@ -505,7 +585,7 @@ def probe(iface=None, mode="discover", mac=None, vendor_class=None, hostname=Non
     pkt = build_packet(mode, xid, mac, ci, request, vendor_class, hostname, broadcast_flag)
     s = _open_socket(iface)
     dest = server or "255.255.255.255"
-    log(f"Sent DHCP{mode.upper()} on {iface['name']} (chaddr {_hex(mac)}, xid 0x{xid:08x}) "
+    log(f"Sent DHCP{mode.upper()} on {iface['name']} (chaddr {_hex(mac)} [{mac_source}], xid 0x{xid:08x}) "
         f"to {dest}; listening {timeout:g}s")
     try:
         s.sendto(pkt, (dest, server_port))
@@ -524,7 +604,7 @@ def probe(iface=None, mode="discover", mac=None, vendor_class=None, hostname=Non
             p = parse_packet(data)
             if not p or p["op"] != 2 or p["xid"] != xid:
                 continue
-            p["source"] = src[0]
+            p.update(source=src[0], mac_source=mac_source, sent_vendor_class=vendor_class)
             replies.append(p)
             log(f"Reply from {src[0]}")
             if first:
@@ -551,18 +631,163 @@ def summarize(p):
         ("yiaddr", "Offered IP (yiaddr)"), ("siaddr", "Next Server (siaddr)"),
         ("giaddr", "Relay Agent (giaddr)"), ("sname", "Server Name (sname)"),
         ("file", "Boot File (file)")) if p[k] and p[k] != "0.0.0.0"]
+    vclass = opts[60].decode("ascii", "replace") if 60 in opts else p.get("sent_vendor_class")
     options = []
     for c, d in sorted(p["options"], key=lambda x: x[0]):
-        v = decode(c, d)
+        v = decode(c, d, vclass)
         options.append({"code": c, "name": option_name(c),
                         "values": (v if isinstance(v, list) else [v]) or [""],
                         "raw": bytes(d).hex()})
     return {"source": p["source"], "type": mt, "server_id": sid, "header": header,
             "fields": {k: p[k] for k in ("yiaddr", "siaddr", "giaddr", "sname", "file")},
-            "options": options}
+            "options": options, "findings": check_reply(p)}
 
 
-def format_text(replies, show_hex=False):
+# ---------------------------------------------------------------- checks
+
+def _u32(b):
+    return struct.unpack("!I", b)[0] if b is not None and len(b) == 4 else None
+
+
+def _ips(b):
+    return [_ip(b[i:i + 4]) for i in range(0, len(b), 4)] if b and len(b) % 4 == 0 else []
+
+
+def check_reply(p):
+    """Flag likely misconfigurations. Returns [{level: warn|info, option, message}]."""
+    out = []
+    o = dict(p["options"])
+
+    def add(level, option, message):
+        out.append({"level": level, "option": option, "message": message})
+
+    client = p["yiaddr"] if p["yiaddr"] != "0.0.0.0" else p.get("ciaddr", "0.0.0.0")
+    net = None
+    if 1 not in o or len(o[1]) != 4:
+        add("warn", 1, "No subnet mask (1). Clients will guess the mask from the address class.")
+    elif client != "0.0.0.0":
+        try:
+            net = ipaddress.IPv4Network(f"{client}/{_ip(o[1])}", strict=False)
+        except ValueError:
+            add("warn", 1, f"Subnet mask {_ip(o[1])} is not a valid contiguous mask.")
+    if net and net.prefixlen < 31 and ipaddress.IPv4Address(client) in (
+            net.network_address, net.broadcast_address):
+        add("warn", None, f"Offered address {client} is the network or broadcast address of {net}.")
+
+    routers = _ips(o.get(3))
+    if not routers:
+        add("warn", 3, "No router (3). Clients will have no default gateway.")
+    elif net:
+        for r in routers:
+            if ipaddress.IPv4Address(r) not in net:
+                add("warn", 3, f"Router {r} is outside the client subnet {net}.")
+    if net and 28 in o and len(o[28]) == 4 and _ip(o[28]) != str(net.broadcast_address):
+        add("warn", 28, f"Broadcast address {_ip(o[28])} doesn't match {net} "
+                        f"(expected {net.broadcast_address}).")
+
+    dns = _ips(o.get(6))
+    if not dns:
+        add("warn", 6, "No DNS servers (6).")
+    elif len(dns) == 1:
+        add("info", 6, "Only one DNS server (6), so there's no redundancy.")
+    if 42 not in o:
+        add("info", 42, "No NTP servers (42). Devices that take time from DHCP (many BAS "
+                        "controllers, IP phones) won't sync, which skews trend and alarm timestamps.")
+
+    lease, t1, t2 = _u32(o.get(51)), _u32(o.get(58)), _u32(o.get(59))
+    if lease is not None and lease != 0xFFFFFFFF:
+        if lease < 3600:
+            add("info", 51, f"Short lease ({_fmt_time(lease)}). Fine for guest networks; "
+                            "unusual for infrastructure.")
+        if p.get("mac_source") == "interface" and lease % 60:
+            add("info", 51, f"Lease time {_fmt_time(lease)} isn't a whole number of minutes, so it's "
+                            "probably what's left of this computer's existing lease, not the scope's "
+                            "configured lease. Probe with a random MAC to see the configured value.")
+        if t1 is not None and t2 is not None and not t1 < t2 <= lease:
+            add("warn", 58, f"Renewal timers are out of order: T1 {t1}s, T2 {t2}s, lease {lease}s "
+                            "(expected T1 < T2 <= lease).")
+    if 44 in o or 46 in o:
+        add("info", 44 if 44 in o else 46, "WINS/NetBIOS options (44/46) are set. These are legacy; "
+                                           "remove them if nothing on this segment still uses WINS.")
+
+    tftp = {}
+    if p.get("siaddr", "0.0.0.0") != "0.0.0.0" and (66 in o or 150 in o or p.get("file")):
+        tftp["siaddr"] = p["siaddr"]
+    if 66 in o:
+        try:
+            tftp["option 66"] = str(ipaddress.IPv4Address(o[66].decode("ascii").strip("\x00").strip()))
+        except (ValueError, UnicodeDecodeError):
+            pass  # hostname; can't compare without DNS
+    for ip in _ips(o.get(150))[:1]:
+        tftp["option 150"] = ip
+    if len(set(tftp.values())) > 1:
+        add("info", 66, "TFTP server differs between " + ", ".join(f"{k} ({v})" for k, v in tftp.items())
+            + ". Devices differ in which one they use.")
+    return out
+
+
+# ---------------------------------------------------------------- baseline
+
+# Options that legitimately differ between probes and shouldn't count as drift.
+BASELINE_IGNORE = {50, 53, 54, 61, 82}
+
+
+def to_record(p):
+    """JSON-ready dict for one reply (the format saved as a baseline)."""
+    s = summarize(p)
+    return {"source": s["source"], "type": s["type"], "server_id": s["server_id"], **s["fields"],
+            "options": [{"code": o["code"], "name": o["name"],
+                         "value": o["values"] if len(o["values"]) > 1 else o["values"][0],
+                         "raw": o["raw"]} for o in s["options"]],
+            "findings": s["findings"]}
+
+
+def load_baseline(path):
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, list):
+        data = data[0] if data else None
+    if not isinstance(data, dict) or "options" not in data:
+        raise ValueError(f"{path} isn't a DHCP Options Finder JSON export.")
+    return data
+
+
+def _val(o):
+    v = o.get("value", "")
+    return ", ".join(v) if isinstance(v, list) else str(v)
+
+
+def compare(record, baseline):
+    """Differences between a reply record and a baseline record, compared on raw bytes."""
+    cur = {o["code"]: o for o in record["options"] if o["code"] not in BASELINE_IGNORE}
+    old = {o["code"]: o for o in baseline["options"] if o["code"] not in BASELINE_IGNORE}
+    changes = []
+    for c in sorted(set(cur) | set(old)):
+        if c not in old:
+            changes.append({"kind": "added", "option": c, "name": cur[c]["name"], "now": _val(cur[c])})
+        elif c not in cur:
+            changes.append({"kind": "removed", "option": c, "name": old[c]["name"], "was": _val(old[c])})
+        elif cur[c]["raw"] != old[c]["raw"]:
+            changes.append({"kind": "changed", "option": c, "name": cur[c]["name"],
+                            "was": _val(old[c]), "now": _val(cur[c])})
+    for k, label in (("siaddr", "Next Server (siaddr)"), ("sname", "Server Name (sname)"),
+                     ("file", "Boot File (file)")):
+        if (record.get(k) or "") != (baseline.get(k) or ""):
+            changes.append({"kind": "changed", "option": None, "name": label,
+                            "was": baseline.get(k) or "", "now": record.get(k) or ""})
+    return changes
+
+
+def format_change(c):
+    code = f"{c['option']:>3} " if c["option"] is not None else "    "
+    if c["kind"] == "added":
+        return f"+ {code}{c['name']}: {c['now']}  (new)"
+    if c["kind"] == "removed":
+        return f"- {code}{c['name']}: was {c['was']}  (removed)"
+    return f"~ {code}{c['name']}: {c['was']} -> {c['now']}"
+
+
+def format_text(replies, show_hex=False, baseline=None):
     if not replies:
         return ("No replies. Check: right interface, server scope/VLAN, firewall (UDP 67/68), "
                 "or try the other mode.")
@@ -579,6 +804,15 @@ def format_text(replies, show_hex=False):
             lines += [f"  {'':>4}  {'':<34} {x}" for x in o["values"][1:]]
             if show_hex:
                 lines.append(f"  {'':>4}  {'':<34} raw: {o['raw']}")
+        lines += ["", "  Checks:"]
+        if s["findings"]:
+            lines += [f"    {'!' if f['level'] == 'warn' else 'i'} {f['message']}" for f in s["findings"]]
+        else:
+            lines.append("    No issues found.")
+        if baseline is not None and n == 1:
+            ch = compare(to_record(p), baseline)
+            lines += ["", "  Changes vs baseline:"]
+            lines += [f"    {format_change(c)}" for c in ch] or ["    None."]
         lines.append("")
     servers = sorted({summarize(p)["server_id"] for p in replies} - {None})
     if len(servers) > 1:
@@ -586,15 +820,10 @@ def format_text(replies, show_hex=False):
     return "\n".join(lines)
 
 
-def format_json(replies):
-    out = []
-    for p in replies:
-        s = summarize(p)
-        out.append({"source": s["source"], "type": s["type"], "server_id": s["server_id"],
-                    **s["fields"],
-                    "options": [{"code": o["code"], "name": o["name"],
-                                 "value": o["values"] if len(o["values"]) > 1 else o["values"][0],
-                                 "raw": o["raw"]} for o in s["options"]]})
+def format_json(replies, baseline=None):
+    out = [to_record(p) for p in replies]
+    if baseline is not None and out:
+        out[0]["changes_vs_baseline"] = compare(out[0], baseline)
     return json.dumps(out, indent=2)
 
 
@@ -610,8 +839,9 @@ def main():
     ap.add_argument("-m", "--mode", choices=["discover", "inform"], default="discover",
                     help="discover = what a new client gets (no lease taken); "
                          "inform = config for a host that already has an IP")
-    ap.add_argument("--mac", help="chaddr/client-id to use, or 'random'. Use a device's MAC "
-                                  "to see its reservation-specific options")
+    ap.add_argument("--mac", help="client MAC to send: a MAC (to see that device's reservation), "
+                                  "'iface' for this interface's MAC, or 'random'. Default: random "
+                                  "for discover, interface MAC for inform")
     ap.add_argument("-V", "--vendor-class", help="option 60 to send (e.g. 'PXEClient', 'MSFT 5.0')")
     ap.add_argument("-H", "--hostname", help="option 12 to send")
     ap.add_argument("-r", "--request", default="1-254",
@@ -623,6 +853,9 @@ def main():
     ap.add_argument("-1", "--first", action="store_true", help="stop after the first reply")
     ap.add_argument("-x", "--hex", action="store_true", help="also show raw hex for each option")
     ap.add_argument("-j", "--json", action="store_true", help="JSON output")
+    ap.add_argument("-b", "--baseline", metavar="FILE",
+                    help="compare the first reply to a saved JSON export; exit 3 if anything changed")
+    ap.add_argument("--save-baseline", metavar="FILE", help="save the replies as JSON to use as a baseline")
     a = ap.parse_args()
 
     try:
@@ -633,15 +866,25 @@ def main():
                 print(f"{star} {i['name']:<20} {i['ip'] or '-':<16} {i['mac']}  "
                       f"{'up' if i['up'] else 'down'}")
             return
-        replies = probe(iface=a.iface, mode=a.mode, mac=parse_mac(a.mac) if a.mac else None,
+        baseline = load_baseline(a.baseline) if a.baseline else None
+        use_iface = (a.mac or "").lower() == "iface"
+        mac = parse_mac(a.mac) if a.mac and not use_iface else None
+        replies = probe(iface=a.iface, mode=a.mode, mac=mac, use_iface_mac=use_iface,
                         vendor_class=a.vendor_class, hostname=a.hostname,
                         request=parse_codes(a.request), server=a.server,
                         server_port=a.server_port, ciaddr=a.ciaddr, timeout=a.timeout,
                         first=a.first, log=None if a.json else (lambda m: print(m, file=sys.stderr)))
-    except (ProbeError, ValueError) as e:
+    except (ProbeError, ValueError, OSError) as e:
         sys.exit(f"Error: {e}")
-    print(format_json(replies) if a.json else format_text(replies, a.hex))
-    sys.exit(0 if replies else 1)
+    print(format_json(replies, baseline) if a.json else format_text(replies, a.hex, baseline))
+    if a.save_baseline and replies:
+        with open(a.save_baseline, "w", encoding="utf-8") as f:
+            f.write(format_json(replies))
+        print(f"Saved baseline to {a.save_baseline}", file=sys.stderr)
+    if not replies:
+        sys.exit(1)
+    if baseline is not None and compare(to_record(replies[0]), baseline):
+        sys.exit(3)
 
 
 if __name__ == "__main__":

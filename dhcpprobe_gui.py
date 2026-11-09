@@ -2,6 +2,8 @@
 """DHCP Options Finder GUI: Tkinter front end for dhcpprobe.py (Linux, macOS, Windows)."""
 import os
 import queue
+import shlex
+import subprocess
 import sys
 import threading
 import tkinter as tk
@@ -10,6 +12,53 @@ from tkinter import filedialog, messagebox, ttk
 import dhcpprobe as core
 
 APP = "DHCP Options Finder"
+
+VENDOR_CLASSES = ["", "PXEClient", "MSFT 5.0", "OptiIpPhone", "Cisco AP c9130", "ubnt", "ArubaAP"]
+COLORS = {"warn": "#b26a00", "info": "#1f5fa8", "ok": "#2e7d32", "change": "#6a1b9a"}
+
+
+# ---------------------------------------------------------------- elevation
+
+def _relaunch_argv():
+    """argv that starts this app again: the frozen executable, or python + this script."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, os.path.abspath(__file__)]
+
+
+def relaunch_elevated():
+    """Start a new elevated copy. Returns a Popen to wait on (macOS), True (Windows), or raises."""
+    argv = _relaunch_argv()
+    if os.name == "nt":
+        import ctypes
+        exe = argv[0]
+        if exe.lower().endswith("python.exe"):  # no console window for the GUI
+            exe = exe[:-10] + "pythonw.exe"
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe,
+                                                 subprocess.list2cmdline(argv[1:]), None, 1)
+        if rc <= 32:  # user cancelled UAC or launch failed
+            raise OSError(f"Windows didn't start the elevated copy (code {rc}).")
+        return True
+    if sys.platform == "darwin":
+        cmd = " ".join(shlex.quote(a) for a in argv) + " >/dev/null 2>&1 &"
+        script = cmd.replace("\\", "\\\\").replace('"', '\\"')
+        return subprocess.Popen(["osascript", "-e",
+                                 f'do shell script "{script}" with administrator privileges'],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    raise OSError("Automatic relaunch isn't supported on this platform.")
+
+
+def _describe_change(c):
+    name = f"{c['name']} ({c['option']})" if c["option"] is not None else c["name"]
+    if c["kind"] == "added":
+        return f"Since baseline: {name} is new: {c['now']}"
+    if c["kind"] == "removed":
+        return f"Since baseline: {name} was removed (was {c['was']})"
+    return f"Since baseline: {name} changed from {c['was']} to {c['now']}"
+
+
+def sudo_hint():
+    return "sudo -E " + " ".join(shlex.quote(a) for a in _relaunch_argv())
 
 
 class App(tk.Tk):
@@ -20,6 +69,8 @@ class App(tk.Tk):
         self.geometry("980x700")
         self.minsize(760, 520)
         self.replies = []
+        self.baseline = None
+        self.baseline_name = ""
         self.q = queue.Queue()
         self.ifaces = []
         self._style()
@@ -78,13 +129,12 @@ class App(tk.Tk):
         macf.grid(row=2, column=1, sticky="ew", **pad)
         self.mac = tk.StringVar()
         ttk.Entry(macf, textvariable=self.mac).pack(side="left", fill="x", expand=True)
-        ttk.Button(macf, text="Random", width=8,
-                   command=lambda: self.mac.set(core._hex(core.parse_mac("random")))).pack(
-            side="left", padx=(4, 0))
+        self.use_iface_mac = tk.BooleanVar(value=False)
+        ttk.Checkbutton(macf, text="Use this computer's MAC", variable=self.use_iface_mac).pack(
+            side="left", padx=(6, 0))
         ttk.Label(cfg, text="Vendor class (60)").grid(row=2, column=3, sticky="e", **pad)
         self.vclass = tk.StringVar()
-        ttk.Combobox(cfg, textvariable=self.vclass, values=[
-            "", "PXEClient", "MSFT 5.0", "Cisco AP c9120", "ArubaAP", "ubnt", "udhcp"]).grid(
+        ttk.Combobox(cfg, textvariable=self.vclass, values=VENDOR_CLASSES).grid(
             row=2, column=4, columnspan=2, sticky="ew", **pad)
 
         ttk.Label(cfg, text="Hostname (12)").grid(row=3, column=0, sticky="w", **pad)
@@ -98,7 +148,7 @@ class App(tk.Tk):
         ttk.Label(cfg, text="Request options").grid(row=4, column=0, sticky="w", **pad)
         self.req = tk.StringVar(value="1-254")
         ttk.Entry(cfg, textvariable=self.req).grid(row=4, column=1, sticky="ew", **pad)
-        ttk.Label(cfg, text="Blank MAC = interface MAC. Blank server = broadcast.",
+        ttk.Label(cfg, text="Blank MAC: random for Discover. Blank server: broadcast.",
                   style="Hint.TLabel").grid(row=4, column=3, columnspan=3, sticky="w", **pad)
 
         bar = ttk.Frame(self)
@@ -126,8 +176,12 @@ class App(tk.Tk):
         ttk.Button(bot, text="Save Text…", command=lambda: self.save("txt")).pack(
             side="left", padx=4)
         ttk.Button(bot, text="Save JSON…", command=lambda: self.save("json")).pack(side="left")
-        ttk.Label(bot, text="Double-click a row to see the full value. Ctrl/Cmd+C copies "
-                            "selected rows.", style="Hint.TLabel").pack(side="right")
+        self.base_btn = ttk.Button(bot, text="Compare to Baseline…", command=self.toggle_baseline)
+        self.base_btn.pack(side="left", padx=(12, 0))
+        self.base_lbl = tk.StringVar()
+        ttk.Label(bot, textvariable=self.base_lbl, style="Hint.TLabel").pack(side="left", padx=6)
+        ttk.Label(bot, text="Double-click a row for the full value.",
+                  style="Hint.TLabel").pack(side="right")
 
         self.bind("<Return>", lambda e: self.run())
 
@@ -159,10 +213,7 @@ class App(tk.Tk):
         if core.is_admin():
             return
         if sys.platform.startswith("linux"):
-            self.warn.set("Not running as root. Probes will fail. Relaunch with sudo.")
-        elif sys.platform == "darwin":
-            self.warn.set("Not running as root. If the probe fails with a permission error, "
-                          "relaunch with sudo.")
+            self.warn.set(f"Not running as root, so probes will fail. Close this and run: {sudo_hint()}")
 
     # ------------------------------------------------------------ probe
     def run(self):
@@ -176,6 +227,7 @@ class App(tk.Tk):
             kw = dict(
                 iface=self.ifaces[sel], mode=self.mode.get(),
                 mac=core.parse_mac(self.mac.get().strip()) if self.mac.get().strip() else None,
+                use_iface_mac=self.use_iface_mac.get(),
                 vendor_class=self.vclass.get().strip() or None,
                 hostname=self.hostname.get().strip() or None,
                 request=core.parse_codes(self.req.get()) or list(range(1, 255)),
@@ -196,9 +248,9 @@ class App(tk.Tk):
         try:
             self.q.put(("done", core.probe(**kw)))
         except core.ProbeError as e:
-            self.q.put(("error", str(e)))
+            self.q.put(("error", (str(e), e.permission)))
         except Exception as e:  # surface anything unexpected instead of hanging
-            self.q.put(("error", f"{type(e).__name__}: {e}"))
+            self.q.put(("error", (f"{type(e).__name__}: {e}", False)))
 
     def _poll(self):
         try:
@@ -211,7 +263,11 @@ class App(tk.Tk):
                 self.run_btn.state(["!disabled"])
                 if kind == "error":
                     self.status.set("Failed.")
-                    messagebox.showerror(APP, val)
+                    msg, permission = val
+                    if permission:
+                        self.offer_elevation(msg)
+                    else:
+                        messagebox.showerror(APP, msg)
                 else:
                     self.show(val)
                 return
@@ -247,6 +303,10 @@ class App(tk.Tk):
         head = f"DHCP{s['type']} from {s['source']}   Server ID: {s['server_id'] or '-'}"
         ttk.Label(f, text=head, font=("TkDefaultFont", 11, "bold")).pack(
             anchor="w", padx=6, pady=(6, 2))
+        changes = []
+        if self.baseline is not None and n == 1:
+            changes = core.compare(core.to_record(self.replies[0]), self.baseline)
+        self._findings_panel(f, s["findings"], changes)
 
         wrap = ttk.Frame(f)
         wrap.pack(fill="both", expand=True, padx=6, pady=6)
@@ -269,15 +329,24 @@ class App(tk.Tk):
         wrap.rowconfigure(0, weight=1)
         wrap.columnconfigure(0, weight=1)
         tv.tag_configure("hdr", foreground="#555555")
+        tv.tag_configure("changed", background="#fff3c4")
+        tv.tag_configure("added", background="#dff3e1")
+        tv.tag_configure("removed", foreground="#888888")
+        kinds = {c["option"]: c["kind"] for c in changes if c["option"] is not None}
 
         if s["header"]:
             for label, v in s["header"]:
                 tv.insert("", "end", text="BOOTP", values=(label, v, ""), tags=("hdr",))
         for o in s["options"]:
+            tag = (kinds[o["code"]],) if o["code"] in kinds else ()
             iid = tv.insert("", "end", text=str(o["code"]),
-                            values=(o["name"], o["values"][0], o["raw"]), open=True)
+                            values=(o["name"], o["values"][0], o["raw"]), open=True, tags=tag)
             for extra in o["values"][1:]:
-                tv.insert(iid, "end", text="", values=("", extra, ""))
+                tv.insert(iid, "end", text="", values=("", extra, ""), tags=tag)
+        for c in changes:
+            if c["kind"] == "removed":
+                tv.insert("", "end", text=str(c["option"]),
+                          values=(c["name"], f"(removed; was {c['was']})", ""), tags=("removed",))
 
         tv.bind("<Double-1>", lambda e, t=tv: self._detail(t))
         mod = "Command" if sys.platform == "darwin" else "Control"
@@ -285,6 +354,71 @@ class App(tk.Tk):
         self.trees.append(tv)
         self._apply_raw(tv)
         self.nb.add(f, text=f"{n}: {s['source']} ({s['type']})")
+
+    def _findings_panel(self, parent, findings, changes):
+        box = ttk.Frame(parent)
+        box.pack(fill="x", padx=8, pady=(0, 2))
+        rows = [("warn" if f["level"] == "warn" else "info", f["message"]) for f in findings]
+        if self.baseline is not None and changes is not None:
+            if changes:
+                rows += [("change", _describe_change(c)) for c in changes]
+            else:
+                rows.append(("ok", f"Matches baseline {self.baseline_name}."))
+        if not findings:
+            rows.insert(0, ("ok", "Checks: no issues found."))
+        icons = {"warn": "⚠", "info": "ℹ", "ok": "✓", "change": "Δ"}
+        for level, msg in rows:
+            line = ttk.Frame(box)
+            line.pack(fill="x", anchor="w")
+            tk.Label(line, text=icons[level], fg=COLORS[level], width=2).pack(side="left", anchor="n")
+            ttk.Label(line, text=msg, wraplength=860, justify="left").pack(side="left", anchor="w")
+
+    def toggle_baseline(self):
+        if self.baseline is not None:
+            self.baseline, self.baseline_name = None, ""
+            self.base_btn.configure(text="Compare to Baseline…")
+            self.base_lbl.set("")
+        else:
+            path = filedialog.askopenfilename(title="Baseline (a saved JSON export)",
+                                              filetypes=[("JSON", "*.json"), ("All files", "*")])
+            if not path:
+                return
+            try:
+                self.baseline = core.load_baseline(path)
+            except (OSError, ValueError) as e:
+                messagebox.showerror(APP, f"Couldn't load baseline: {e}")
+                return
+            self.baseline_name = os.path.basename(path)
+            self.base_btn.configure(text="Stop Comparing")
+            self.base_lbl.set(f"Baseline: {self.baseline_name}")
+        if self.replies:
+            self.show(self.replies)
+
+    def offer_elevation(self, msg):
+        if os.name != "nt" and sys.platform != "darwin":
+            messagebox.showerror(APP, f"{msg}\n\nClose this window and run:\n\n{sudo_hint()}")
+            return
+        if not messagebox.askyesno(APP, f"{msg}\n\n{APP} needs administrator rights to use the "
+                                        "DHCP client port. Relaunch with administrator rights?"):
+            return
+        try:
+            proc = relaunch_elevated()
+        except OSError as e:
+            messagebox.showerror(APP, str(e))
+            return
+        if proc is True:
+            self.destroy()
+            return
+        self.status.set("Waiting for the administrator password…")
+        self._wait_elevation(proc)
+
+    def _wait_elevation(self, proc):
+        if proc.poll() is None:
+            self.after(300, self._wait_elevation, proc)
+        elif proc.returncode == 0:
+            self.destroy()
+        else:
+            self.status.set("Relaunch cancelled.")
 
     def _apply_raw(self, tv):
         tv["displaycolumns"] = ("name", "value", "raw") if self.show_raw.get() else ("name", "value")
@@ -329,7 +463,7 @@ class App(tk.Tk):
         if not self.replies:
             return
         self.clipboard_clear()
-        self.clipboard_append(core.format_text(self.replies, self.show_raw.get()))
+        self.clipboard_append(core.format_text(self.replies, self.show_raw.get(), self.baseline))
         self.status.set("Copied results to clipboard.")
 
     def save(self, kind):
@@ -342,7 +476,7 @@ class App(tk.Tk):
         if not path:
             return
         data = (core.format_json(self.replies) if kind == "json"
-                else core.format_text(self.replies, self.show_raw.get()))
+                else core.format_text(self.replies, self.show_raw.get(), self.baseline))
         with open(path, "w", encoding="utf-8") as f:
             f.write(data)
         self.status.set(f"Saved {os.path.basename(path)}")
