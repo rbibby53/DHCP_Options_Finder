@@ -49,10 +49,11 @@ Grab the build for your OS from the **[latest release](https://github.com/rbibby
 |---|---|---|
 | Windows | `DHCPOptionsFinder-windows-x64.exe` | Double-click. If nothing comes back, right-click and choose **Run as administrator** |
 | macOS (Apple silicon) | `DHCPOptionsFinder-macos-arm64.zip` | Unzip, then `sudo DHCPOptionsFinder.app/Contents/MacOS/DHCPOptionsFinder` |
-| macOS (Intel) | `DHCPOptionsFinder-macos-x64.zip` | Same as above |
 | Linux | `DHCPOptionsFinder-linux-x64.tar.gz` | `tar xzf …` then `sudo ./DHCPOptionsFinder` (glibc 2.39+: Fedora 40+, Ubuntu 24.04+, Debian 13, RHEL 10) |
 
 CLI-only builds (`dhcpprobe-cli-*`) and `SHA256SUMS.txt` are attached to every release.
+
+Intel Macs are no longer supported. The last Intel build is in [v0.1.0](https://github.com/rbibby53/DHCP_Options_Finder/releases/tag/v0.1.0); running [from source](#from-source) still works.
 
 > [!NOTE]
 > Builds are not code-signed yet. On macOS, if Gatekeeper blocks the app: right-click, then **Open**, or run `xattr -dr com.apple.quarantine DHCPOptionsFinder.app`. On Windows, SmartScreen will warn: click **More info**, then **Run anyway**.

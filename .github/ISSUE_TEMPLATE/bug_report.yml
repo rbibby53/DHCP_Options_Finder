@@ -9,7 +9,7 @@ body:
     id: os
     attributes:
       label: Operating system
-      options: [Windows, macOS (Apple silicon), macOS (Intel), Linux]
+      options: [Windows, macOS (Apple silicon), Linux]
     validations:
       required: true
   - type: dropdown
