@@ -1,6 +1,6 @@
 [project]
 name = "dhcp-options-finder"
-version = "0.1.0"
+version = "0.2.0"
 description = "Query DHCP servers and decode every option they hand out. Cross-platform GUI + CLI."
 readme = "README.md"
 license = "AGPL-3.0-or-later"

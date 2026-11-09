@@ -51,7 +51,8 @@ def test_common_options():
 
 def test_complex_options():
     o = opts(reply())
-    assert o[43][1:] == ["sub 1: 10.5.5.5 (0x0a050505)", "sub 2: hello"]
+    assert o[43][:2] == ["sub 1: 10.5.5.5 (or 168101125)", "sub 2: hello"]
+    assert o[43][-1].startswith("raw: 0x0104")
     assert o[119] == ["bas.example.com", "it.example.com"]
     assert o[121] == ["10.50.0.0/24 via 10.20.30.254", "0.0.0.0/0 via 10.20.30.1"]
     assert o[125] == ["enterprise 3561: sub 1: ABCD"]

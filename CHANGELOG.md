@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-09
+
+### Added
+- Vendor decoders for option 43: Siemens/Unify phones (voice VLAN ID, DLS server), Cisco AP WLC lists, UniFi controller, Aruba controller strings, and Microsoft vendor options. The vendor class from the reply (or the one sent) picks the decoder.
+- Config checks on every reply: missing or invalid subnet mask, router outside the subnet, broadcast address mismatch, offered address equal to the network/broadcast address, missing DNS or NTP, single DNS server, short lease, out-of-order T1/T2, conflicting TFTP servers (siaddr/66/150), legacy WINS/NetBIOS, and a lease time that looks like the remaining time on this computer's own lease.
+- Baseline comparison: `--save-baseline` / `--baseline` in the CLI (exit code 3 on drift) and **Compare to Baseline…** in the GUI, which highlights changed and added options and lists removed ones.
+- Relaunch with administrator rights on Windows (UAC) and macOS (password prompt) when the probe hits a permission error.
+- Option 160 (Polycom provisioning URL) and an `OptiIpPhone` vendor class preset.
+
+### Changed
+- Discover now uses a random, locally administered MAC by default, so an existing lease on this computer doesn't skew the offer. Use **Use this computer's MAC** (GUI) or `--mac iface` (CLI) for the old behaviour.
+- 4-byte sub-option values show as both a number and an IP address (e.g. `41 (or IP 0.0.0.41)`) instead of always as an IP.
+- JSON output includes `findings` per reply, and `changes_vs_baseline` when a baseline is given.
+
 ### Removed
 - Intel Mac (macOS x64) builds. Releases now ship macOS Apple silicon only; v0.1.0 is the last release with an Intel build. Running from source on an Intel Mac still works but isn't tested.
 
@@ -24,5 +38,6 @@ First release.
 - Running from source needs Python 3.11 or newer.
 - The Linux build needs glibc 2.39+ (Fedora 40+, Ubuntu 24.04+, Debian 13, RHEL 10).
 
-[Unreleased]: https://github.com/rbibby53/DHCP_Options_Finder/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/rbibby53/DHCP_Options_Finder/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/rbibby53/DHCP_Options_Finder/releases/tag/v0.2.0
 [0.1.0]: https://github.com/rbibby53/DHCP_Options_Finder/releases/tag/v0.1.0
