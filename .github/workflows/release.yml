@@ -21,7 +21,7 @@ jobs:
           - { name: macos-x64,   os: macos-15-intel }
           - { name: linux-x64,   os: ubuntu-22.04 }   # older glibc = runs on more distros
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
