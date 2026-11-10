@@ -352,6 +352,8 @@ class App(tk.Tk):
             iid = tv.insert("", "end", text=str(o["code"]),
                             values=(o["name"], o["values"][0], o["raw"]), open=True, tags=tag)
             for extra in o["values"][1:]:
+                if extra.startswith("raw: 0x"):
+                    continue  # already in the Raw (hex) column
                 tv.insert(iid, "end", text="", values=("", extra, ""), tags=tag)
         for c in changes:
             if c["kind"] == "removed":

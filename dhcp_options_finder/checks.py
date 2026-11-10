@@ -48,11 +48,14 @@ def check_reply(p):
     dns = _ips(o.get(6))
     if not dns:
         add("warn", 6, "No DNS servers (6).")
-    elif len(dns) == 1:
+    elif len(dns) == 1 and dns[0] not in routers:
+        # A lone resolver on the gateway itself (home/small office) adds no single point of
+        # failure the gateway doesn't already have, so only flag a separate DNS box.
         add("info", 6, "Only one DNS server (6), so there's no redundancy.")
     if 42 not in o:
-        add("info", 42, "No NTP servers (42). Devices that take time from DHCP (many BAS "
-                        "controllers, IP phones) won't sync, which skews trend and alarm timestamps.")
+        add("info", 42, "No NTP servers (42). Fine for devices that reach internet time servers; "
+                        "devices on isolated VLANs (BAS controllers, phones, IoT without internet) "
+                        "need one here or their clocks drift.")
 
     lease, t1, t2 = _u32(o.get(51)), _u32(o.get(58)), _u32(o.get(59))
     if lease is not None and lease != 0xFFFFFFFF:

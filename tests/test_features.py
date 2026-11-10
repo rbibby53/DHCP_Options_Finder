@@ -104,6 +104,8 @@ def test_addressing_findings():
     assert {("warn", 1), ("warn", 3), ("warn", 6)} <= f
     assert ("warn", None) in findings(reply(GOOD, yiaddr="10.58.40.255"))
     assert ("info", 6) in findings(reply({**GOOD, 6: ip("10.54.38.5")}))
+    # Home/small office: the only resolver is the gateway itself -> not worth flagging
+    assert ("info", 6) not in findings(reply({**GOOD, 6: ip("10.58.40.1")}))
 
 
 def test_timer_and_tftp_findings():
