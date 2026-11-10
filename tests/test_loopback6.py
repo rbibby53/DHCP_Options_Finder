@@ -46,13 +46,22 @@ def test_dhcpv6_info_and_solicit_loopback():
     assert any(o["code"] == 3 and "2001:db8:1::1000" in " ".join(o["values"]) for o in adv["options"])
 
 
+WINDOWS = os.name == "nt"
+
+
 def test_router_advertisements_loopback():
     router = FakeRouter(HOME_RA, THREAD_BR)
     router.start()
-    routers = net6.ra_probe(iface=IFACE, timeout=3, rs_dest="::1")
+    dns = []
+    routers = net6.ra_probe(iface=IFACE, timeout=3, rs_dest="::1", os_dns=dns)
     router.join(5)
-    assert len(routers) == 1  # both RAs come from ::1; the latest one wins
-    assert routers[0]["source"] == "::1"
+    if WINDOWS:
+        # Windows never hands RAs to apps; this exercises the real PowerShell learned-state path.
+        assert all(r["via"] == "windows" for r in routers)
+        assert isinstance(dns, list)
+    else:
+        assert len(routers) == 1  # both RAs come from ::1; the latest one wins
+        assert routers[0]["source"] == "::1"
 
 
 def test_probe6_combined_loopback():
@@ -64,5 +73,10 @@ def test_probe6_combined_loopback():
     srv.join(5)
     router.join(5)
     assert res["errors"] == {}
-    assert res["routers"] and len(res["dhcpv6"]) == 2
-    assert "Router ::1" in report6.format_text6(res)
+    assert len(res["dhcpv6"]) == 2
+    if WINDOWS:
+        assert res["ra_source"] == "windows"
+        assert "Windows doesn't let apps read Router Advertisements" in report6.format_text6(res)
+    else:
+        assert res["routers"] and res["ra_source"] == "captured"
+        assert "Router ::1" in report6.format_text6(res)

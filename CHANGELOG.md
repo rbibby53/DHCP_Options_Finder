@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-10
+
+### Added
+- **IPv6 mode.** **Protocol → IPv6** in the GUI, `-6` in the CLI.
+  - **Router Advertisements:** sends a Router Solicitation and decodes every RA: default-router lifetime and preference, M/O flags, prefixes (on-link/SLAAC, lifetimes), Route Information, RDNSS, DNSSL, MTU, NAT64 prefix (PREF64), captive portal.
+  - **DHCPv6:** Information-Request for options (DNS, domains, NTP, SNTP, vendor options, timezone, boot URL and more), and Solicit to see the address (and, with `--pd`, the delegated prefix) a server would assign. Never sends a Request, so no lease is taken.
+  - **IPv6 checks:** more than one default router (rogue RA), M/O flags with no DHCPv6 server, M flag with no address offered, no RDNSS (Android has no DHCPv6), no IPv6 DNS at all, SLAAC on a non-/64 prefix, bad prefix lifetimes, MTU below 1280, multiple DHCPv6 servers, and Thread/Matter border routers, including different border routers advertising different Thread prefixes.
+  - Text and JSON output; profiles remember the protocol and IPv6 checks.
+
+### Notes
+- Sweep and baselines are IPv4-only for now.
+- Router Advertisements need a raw socket. They work on Linux and macOS; on Windows, reading RAs may not work on every system, and when it doesn't the probe says so and still runs DHCPv6.
+
+
 ## [0.3.0] - 2026-11-10
 
 ### Added
@@ -55,7 +69,8 @@ First release.
 - Running from source needs Python 3.11 or newer.
 - The Linux build needs glibc 2.39+ (Fedora 40+, Ubuntu 24.04+, Debian 13, RHEL 10).
 
-[Unreleased]: https://github.com/rbibby53/DHCP_Options_Finder/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/rbibby53/DHCP_Options_Finder/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/rbibby53/DHCP_Options_Finder/releases/tag/v0.4.0
 [0.3.0]: https://github.com/rbibby53/DHCP_Options_Finder/releases/tag/v0.3.0
 [0.2.0]: https://github.com/rbibby53/DHCP_Options_Finder/releases/tag/v0.2.0
 [0.1.0]: https://github.com/rbibby53/DHCP_Options_Finder/releases/tag/v0.1.0

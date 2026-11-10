@@ -533,6 +533,11 @@ class App(tk.Tk):
         f = ttk.Frame(self.nb)
         ttk.Label(f, text=f"IPv6 on {res['iface']}   link-local {res['link_local']}",
                   font=("TkDefaultFont", 11, "bold")).pack(anchor="w", padx=6, pady=(6, 2))
+        if res.get("ra_source") == "windows":
+            dns = f" IPv6 DNS in use: {', '.join(res['os_dns'])}." if res.get("os_dns") else ""
+            ttk.Label(f, text="Windows doesn't let apps read Router Advertisements; routers below are "
+                              f"what Windows learned from them.{dns}",
+                      style="Hint.TLabel", wraplength=900).pack(anchor="w", padx=8)
         self._findings_panel(f, findings, None)
         tv = self._tree(f, ("value",), ("Router", "Value"), (300, 640))
         if not res["routers"]:

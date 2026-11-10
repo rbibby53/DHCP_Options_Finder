@@ -41,6 +41,7 @@ Checking what a scope delivers usually means a packet capture or logging into th
 - **Checks the config.** Flags likely mistakes: router outside the subnet, mismatched broadcast address, missing DNS or NTP, out-of-order renewal timers, conflicting TFTP servers, leftover WINS.
 - **Spots drift.** Save a known-good scope as a baseline; later probes show exactly what changed.
 - **Decodes the hard ones:** 82 relay info, 119 domain search (with compression), 121/249 classless routes, 125 vendor-identifying info, option overload (52) and RFC 3396 split options.
+- **Does IPv6 too.** Listens for Router Advertisements (prefixes, M/O flags, RDNSS, routes) and runs DHCPv6 Information-Request and Solicit, then checks for rogue RAs, flags with no DHCPv6 server, missing DNS for Android, broken SLAAC prefixes and split Thread/Matter networks.
 - **Remembers your setups.** Save named profiles (interface, vendor class, MAC…); the last settings come back on launch.
 - **Exports** to text or JSON, or copies selected rows to the clipboard.
 
@@ -103,7 +104,11 @@ Either way you need Python 3.11+ with Tkinter (Fedora: `sudo dnf install python3
    <img src="docs/sweep.png" width="720" alt="Vendor class sweep showing which options each class receives">
 
 6. To track changes, **Save JSON…** a known-good result, then later click **Compare to Baseline…** and pick that file. Changed options are highlighted and listed above the table.
-7. **Profile → Save As…** stores the current settings under a name, e.g. "Siemens phone" or "AP VLAN". Your last settings are also restored automatically. Profiles live in your user folder (`%APPDATA%`, `~/Library/Application Support` or `~/.config`), even when the app runs as administrator.
+7. For **IPv6**, set **Protocol** to *IPv6 (RA + DHCPv6)*, pick which checks to run, and click **Run Probe**. The **Routers** tab lists every router that answered a Router Solicitation, with flags, prefixes, DNS and routes, and the IPv6 checks on top. The **DHCPv6** tab shows each server's reply.
+
+   <img src="docs/ipv6.png" width="720" alt="IPv6 results with routers, a Thread border router, and checks">
+
+8. **Profile → Save As…** stores the current settings under a name, e.g. "Siemens phone" or "AP VLAN". Your last settings are also restored automatically. Profiles live in your user folder (`%APPDATA%`, `~/Library/Application Support` or `~/.config`), even when the app runs as administrator.
 
 ## CLI
 
@@ -126,6 +131,9 @@ sudo python3 dhcpprobe.py -i eth0 --sweep-classes ",OptiIpPhone,Mitel"  # sweep 
 sudo python3 dhcpprobe.py -i eth1 -V OptiIpPhone --save-profile phones  # remember these settings
 sudo python3 dhcpprobe.py -p phones                          # reuse them (flags still override)
 sudo python3 dhcpprobe.py --list-profiles
+sudo python3 dhcpprobe.py -i eth0 -6                         # IPv6: Router Advertisements + DHCPv6
+sudo python3 dhcpprobe.py -i eth0 -6 --no-solicit            # IPv6 options only, don't ask for an address
+sudo python3 dhcpprobe.py -i eth0 -6 --pd -j                 # also ask for a delegated prefix; JSON
 ```
 
 <details>
@@ -163,6 +171,49 @@ sudo python3 dhcpprobe.py --list-profiles
 </details>
 
 <details>
+<summary>Example IPv6 probe</summary>
+
+```text
+IPv6 on en0 (link-local fe80::1c2b:3cff:fe4d:5e6f)
+
+=== Router Advertisements: 2 router(s) ===
+
+  Router fe80::1
+    Default router           yes, lifetime 1800 s (30m), preference medium
+    Flags                    Other config (O): use DHCPv6 for DNS etc.
+    Router MAC               00:11:22:33:44:55
+    Prefix                   2001:db8:1::/64 (on-link, SLAAC; valid 2592000 s (30d), preferred 604800 s (7d))
+    DNS server (RDNSS)       2001:db8:1::1 (lifetime 3600 s (1h))
+    Search domain (DNSSL)    example.net (lifetime 3600 s (1h))
+    MTU                      1500
+    Hop limit                64
+
+  Router fe80::a8bb:ccff:fe00:1
+    Default router           no (lifetime 0: advertises routes/prefixes only)
+    Router MAC               00:11:22:33:44:55
+    Route                    fd3e:1234:5678::/64 (lifetime 1800 s (30m), preference medium)
+    Hop limit                64
+
+=== DHCPv6: 1 reply ===
+
+  REPLY to information-request from fe80::53
+  Code  Option                         Value
+  ----  ------------------------------ ------------------------------------
+     1  Client Identifier              DUID-LL 02:aa:bb:cc:dd:ee
+     2  Server Identifier              DUID-LL 00:11:22:33:44:55
+    23  DNS Servers                    2001:db8:1::53
+                                       2001:db8:1::54
+    24  Domain Search List             example.net
+    56  NTP Servers                    server 2001:db8:1::123
+                                       server time.example.net
+    32  Information Refresh Time       86400 s (1d)
+
+Checks:
+  i Thread/Matter border router(s): fe80::a8bb:ccff:fe00:1 routes fd3e:1234:5678::/64.
+```
+</details>
+
+<details>
 <summary>Example sweep</summary>
 
 ```text
@@ -192,10 +243,15 @@ Baseline comparison works on the raw option bytes and ignores options that legit
 | No replies | Check you're on the right interface/VLAN and that the scope or a relay (`ip helper-address`) covers this segment. Try the other mode. |
 | Option 43 missing | The server probably keys it on vendor class. Set **Vendor class (60)** to what the device sends. |
 | Windows: nothing back in Discover | Try **Inform**. Its reply is unicast to your IP, which is more likely to reach the app on Windows. |
+| IPv6: `no IPv6 link-local address` | IPv6 is disabled on that interface. |
+| IPv6: no Router Advertisements | IPv6 isn't routed on this segment, or RA Guard on the switch port is dropping them. Routers answer a Router Solicitation right away, so a longer timeout rarely helps. |
+| IPv6 on Windows: routers missing but DHCPv6 works | Windows may not hand Router Advertisements to applications. The rest of the probe still runs, and the checks note that RAs couldn't be read. Please open an issue with the output. |
 
 ## How it works
 
 DHCP Options Finder builds a standard BOOTP/DHCP packet with option 55 (Parameter Request List) set to codes 1–254. Option 55 is split across instances per RFC 3396, since it doesn't fit in 255 bytes. It's sent from UDP/68 to 255.255.255.255:67 (or a server you name) with the broadcast flag set. The socket is pinned to the selected NIC (`SO_BINDTODEVICE` on Linux, `IP_BOUND_IF` on macOS, bound to the interface address on Windows). Replies are matched on transaction ID and decoded. Nothing beyond that single packet is ever sent.
+
+For IPv6 it sends one Router Solicitation to `ff02::2` from a raw ICMPv6 socket and collects Router Advertisements. At the same time it sends a DHCPv6 Information-Request and a Solicit (without Rapid Commit) from UDP/546 to `ff02::1:2`. It never sends a Request, so no IPv6 lease is taken either.
 
 ## Development
 

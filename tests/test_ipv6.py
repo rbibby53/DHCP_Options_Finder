@@ -219,3 +219,46 @@ def test_cli_ipv6(monkeypatch, capsys):
         cli.main()
     except SystemExit as e:
         assert "IPv4-only" in str(e.code)
+
+
+# ------------------------------------------------------------ Windows learned-state fallback
+
+WIN_STATE = {  # shape produced by net6._WIN_PS (PowerShell ConvertTo-Json)
+    "managed": "Disabled", "other": "Enabled", "hop": 64,
+    "routes": [{"prefix": "::/0", "hop": "fe80::1%14", "valid": 1795.2},
+               {"prefix": "fd3e:1234:5678::/64", "hop": "fe80::a", "valid": 1700},
+               {"prefix": "::/0", "hop": "fe80::bad", "valid": 9.223e11}],
+    "addrs": [{"ip": "2001:db8:1::abcd", "len": 64, "valid": 2591000, "preferred": 604000},
+              {"ip": "2001:db8:1::1234", "len": 64, "valid": 2591000, "preferred": 0}],
+    "dns": "2001:db8:1::53",  # PowerShell collapses one-element arrays
+}
+
+
+def test_windows_state_mapping():
+    from dhcp_options_finder import net6
+    routers, dns = net6.windows_routers(WIN_STATE)
+    by = {r["source"]: r["ra"] for r in routers}
+    assert set(by) == {"fe80::1", "fe80::a", "fe80::bad"} and dns == ["2001:db8:1::53"]
+    gw = by["fe80::1"]
+    assert gw["router_lifetime"] == 1795 and gw["other"] and not gw["managed"]
+    assert by["fe80::1"]["prefixes"][0]["prefix"] == "2001:db8:1::/64" and len(by["fe80::1"]["prefixes"]) == 1
+    assert by["fe80::bad"]["router_lifetime"] == 0xFFFF  # infinite TimeSpan clamps to max RA lifetime
+    assert by["fe80::a"]["router_lifetime"] == 0
+    assert by["fe80::a"]["routes"][0]["prefix"] == "fd3e:1234:5678::/64"
+    assert all(r["via"] == "windows" for r in routers)
+
+
+def test_windows_checks_skip_rdnss_but_catch_rogue_and_thread():
+    from dhcp_options_finder import net6
+    routers, dns = net6.windows_routers(WIN_STATE)
+    res = {"iface": "Ethernet", "link_local": "fe80::2", "routers": routers, "dhcpv6": [], "errors": {},
+           "ran": {"ra": True, "dhcpv6": True}, "solicited": True, "ra_source": "windows", "os_dns": dns}
+    msgs = [f["message"] for f in report6.check6(res)]
+    assert not any("RDNSS" in m or "Android" in m for m in msgs)
+    assert any("2 routers claim to be the default IPv6 router" in m for m in msgs)
+    assert any(m.startswith("Thread/Matter border router(s): fe80::a") for m in msgs)
+    text = report6.format_text6(res)
+    assert "Windows doesn't let apps read Router Advertisements" in text
+    assert "IPv6 DNS servers in use: 2001:db8:1::53" in text
+    res["os_dns"] = []
+    assert any("No IPv6 DNS servers" in f["message"] for f in report6.check6(res))

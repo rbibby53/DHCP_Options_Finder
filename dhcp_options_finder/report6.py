@@ -59,7 +59,12 @@ def check6(result):
 
     rdnss = [d for r in default for d in r["ra"]["rdnss"]]
     dhcp_dns = any(c == 23 for r in replies for c, _ in r["options"])
-    if default and not rdnss:
+    if result.get("ra_source") == "windows":
+        # Windows reports learned state, not the RAs themselves: it can't say whether a DNS
+        # server came from RDNSS or DHCPv6, so only flag the case where there's none at all.
+        if default and not result.get("os_dns") and not dhcp_dns and ran_dhcp:
+            add("warn", "No IPv6 DNS servers from either Router Advertisements or DHCPv6.")
+    elif default and not rdnss:
         if dhcp_dns:
             add("info", "No DNS servers in Router Advertisements (RDNSS); DNS comes only from DHCPv6. "
                         "Android has no DHCPv6 client, so Android devices get no IPv6 DNS here.")
@@ -119,6 +124,7 @@ def to_record6(result):
                                  "value": o["values"] if len(o["values"]) > 1 else o["values"][0],
                                  "raw": o["raw"]} for o in dhcpv6.summarize(m)["options"]]}
                    for m in result["dhcpv6"]],
+        "router_source": result.get("ra_source", "captured"), "os_dns": result.get("os_dns", []),
         "errors": result["errors"], "findings": check6(result),
     }
 
@@ -131,6 +137,11 @@ def format_text6(result, show_hex=False):
     lines = [f"IPv6 on {result['iface']} (link-local {result['link_local']})", ""]
     if result["ran"]["ra"]:
         lines.append(f"=== Router Advertisements: {len(result['routers'])} router(s) ===")
+        if result.get("ra_source") == "windows":
+            lines.append("  (Windows doesn't let apps read Router Advertisements; this is what Windows "
+                         "learned from them after a Router Solicitation)")
+            if result.get("os_dns"):
+                lines.append(f"  IPv6 DNS servers in use: {', '.join(result['os_dns'])}")
         if "ra" in result["errors"]:
             lines.append(f"  (not checked: {result['errors']['ra']})")
         for r in result["routers"]:

@@ -1,4 +1,6 @@
 """IPv6 probes: Router Solicitation/Advertisement and DHCPv6 (Linux, macOS, Windows)."""
+import ipaddress
+import json
 import os
 import random
 import re
@@ -71,9 +73,101 @@ def _bind_device(s, iface):
 
 # ---------------------------------------------------------------- router advertisements
 
-def ra_probe(iface=None, timeout=5.0, solicit=True, rs_dest=ra.ALL_ROUTERS, log=None):
+# Windows' stack keeps Router Advertisements to itself: raw ICMPv6 sockets never see them
+# (verified on GitHub's Windows runners). So on Windows we still send the Router Solicitation,
+# give routers a moment to answer, then read what Windows learned from them.
+_WIN_PS = r"""
+$i = __IDX__
+$if = Get-NetIPInterface -AddressFamily IPv6 -InterfaceIndex $i -ErrorAction Stop
+$routes = @(Get-NetRoute -AddressFamily IPv6 -InterfaceIndex $i -ErrorAction SilentlyContinue |
+  Where-Object { $_.NextHop -like 'fe80*' } |
+  ForEach-Object { [pscustomobject]@{ prefix = $_.DestinationPrefix; hop = $_.NextHop;
+                                      valid = [double]$_.ValidLifetime.TotalSeconds } })
+$addrs = @(Get-NetIPAddress -AddressFamily IPv6 -InterfaceIndex $i -ErrorAction SilentlyContinue |
+  Where-Object { "$($_.PrefixOrigin)" -eq 'RouterAdvertisement' } |
+  ForEach-Object { [pscustomobject]@{ ip = $_.IPAddress; len = [int]$_.PrefixLength;
+                                      valid = [double]$_.ValidLifetime.TotalSeconds;
+                                      preferred = [double]$_.PreferredLifetime.TotalSeconds } })
+$dns = @((Get-DnsClientServerAddress -AddressFamily IPv6 -InterfaceIndex $i `
+           -ErrorAction SilentlyContinue).ServerAddresses)
+[pscustomobject]@{ managed = "$($if.ManagedAddressConfiguration)";
+                   other = "$($if.OtherStatefulConfiguration)"; hop = [int]$if.CurrentHopLimit;
+                   routes = $routes; addrs = $addrs; dns = $dns } |
+  ConvertTo-Json -Depth 4 -Compress
+"""
+
+
+def _secs(v):
+    """TimeSpan seconds from PowerShell -> int; TimeSpan.MaxValue (infinite) -> 0xFFFFFFFF."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 0
+    return 0xFFFFFFFF if v >= 0xFFFFFFFF else max(int(v), 0)
+
+
+def windows_routers(state):
+    """Turn Windows' learned IPv6 state (from _WIN_PS) into the same shape ra_probe returns.
+    Pure function so it can be tested anywhere."""
+    def as_list(x):
+        return x if isinstance(x, list) else ([] if x is None else [x])
+
+    managed = str(state.get("managed", "")).lower() == "enabled"
+    other = str(state.get("other", "")).lower() == "enabled"
+    prefixes, seen = [], set()
+    for a in as_list(state.get("addrs")):
+        try:
+            net = ipaddress.IPv6Interface(f"{a['ip'].split('%')[0]}/{int(a['len'])}").network
+        except (KeyError, ValueError, TypeError):
+            continue
+        if str(net) in seen:
+            continue
+        seen.add(str(net))
+        prefixes.append({"prefix": str(net), "length": net.prefixlen, "on_link": True, "autonomous": True,
+                         "valid": _secs(a.get("valid")), "preferred": _secs(a.get("preferred"))})
+    hops = {}
+    for r in as_list(state.get("routes")):
+        hop = str(r.get("hop", "")).split("%")[0]
+        if hop:
+            hops.setdefault(hop, []).append(r)
+    routers = []
+    for hop, rs in hops.items():
+        default = next((x for x in rs if x.get("prefix") == "::/0"), None)
+        lifetime = min(_secs(default.get("valid")), 0xFFFF) if default else 0
+        info = {
+            "hop_limit": int(state.get("hop") or 0), "managed": managed and bool(default),
+            "other": other and bool(default), "home_agent": False, "preference": "medium",
+            "proxy": False, "router_lifetime": lifetime, "reachable_ms": 0, "retrans_ms": 0,
+            "prefixes": prefixes if default else [], "mtu": None, "mac": None,
+            "routes": [{"prefix": x["prefix"], "lifetime": _secs(x.get("valid")), "preference": "medium"}
+                       for x in rs if x.get("prefix") not in ("::/0", None)],
+            "rdnss": [], "dnssl": [], "captive_portal": None, "pref64": [], "unknown": [],
+        }
+        routers.append({"source": hop, "ra": info, "via": "windows"})
+    return routers, [d for d in as_list(state.get("dns")) if d]
+
+
+def _windows_ra(iface, idx, timeout, log):
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                              _WIN_PS.replace("__IDX__", str(int(idx)))],
+                             capture_output=True, text=True, timeout=max(timeout, 5) + 20)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise ProbeError(f"Couldn't read Windows' IPv6 router state: {e}") from e
+    try:
+        state = json.loads(out.stdout or "{}")
+    except ValueError as e:
+        raise ProbeError("Couldn't read Windows' IPv6 router state: "
+                         f"{(out.stderr or out.stdout).strip()[:200]}") from e
+    routers, dns = windows_routers(state)
+    log(f"Read Windows' IPv6 state for {iface['name']}: {len(routers)} router(s)")
+    return routers, dns
+
+def ra_probe(iface=None, timeout=5.0, solicit=True, rs_dest=ra.ALL_ROUTERS, log=None, os_dns=None):
     """Send a Router Solicitation and collect Router Advertisements for `timeout` seconds.
-    Returns [{source, ra}], one per router (latest RA wins)."""
+    Returns [{source, ra}], one per router (latest RA wins). On Windows the entries carry
+    via='windows' and come from the OS's learned state; `os_dns` (a list) receives the
+    IPv6 DNS servers Windows is using."""
     log = log or (lambda m: None)
     iface, idx = _resolve(iface)
     try:
@@ -93,6 +187,12 @@ def ra_probe(iface=None, timeout=5.0, solicit=True, rs_dest=ra.ALL_ROUTERS, log=
             mac = bytes.fromhex(iface["mac"].replace(":", "")) if iface.get("mac") else None
             s.sendto(ra.build_rs(iface["ip6ll"], mac), _addr(rs_dest, 0, idx))
             log(f"Sent Router Solicitation on {iface['name']}; listening {timeout:g}s")
+        if os.name == "nt":
+            time.sleep(min(timeout, 2.0))  # let routers answer and Windows update its state
+            routers, dns = _windows_ra(iface, idx, timeout, log)
+            if os_dns is not None:
+                os_dns.extend(dns)
+            return routers
         routers, deadline = {}, time.monotonic() + timeout
         while (left := deadline - time.monotonic()) > 0:
             r, _, _ = select.select([s], [], [], left)
@@ -184,7 +284,9 @@ def probe6(iface=None, ra_on=True, info=True, solicit=True, pd=False, timeout=5.
     they're reported in result['errors'] unless both fail with a permission problem."""
     log = log or (lambda m: None)
     iface, _ = _resolve(iface)
+    os_dns = []
     result = {"iface": iface["name"], "link_local": iface["ip6ll"], "routers": [], "dhcpv6": [],
+              "os_dns": os_dns, "ra_source": "windows" if os.name == "nt" else "captured",
               "errors": {}, "ran": {"ra": ra_on, "dhcpv6": info or solicit}, "solicited": solicit}
     failures = []
 
@@ -197,7 +299,8 @@ def probe6(iface=None, ra_on=True, info=True, solicit=True, pd=False, timeout=5.
 
     threads = []
     if ra_on:
-        threads.append(threading.Thread(target=run, args=("ra", ra_probe), kwargs={"rs_dest": rs_dest}))
+        threads.append(threading.Thread(target=run, args=("ra", ra_probe),
+                                        kwargs={"rs_dest": rs_dest, "os_dns": os_dns}))
     if info or solicit:
         threads.append(threading.Thread(target=run, args=("dhcpv6", dhcpv6_probe),
                                         kwargs=dict(info=info, solicit=solicit, pd=pd, **dhcp_kw)))
