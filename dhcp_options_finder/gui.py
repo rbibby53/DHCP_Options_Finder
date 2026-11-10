@@ -54,10 +54,18 @@ def _relaunch_argv():
     return [sys.executable, "-m", "dhcp_options_finder.gui"]
 
 
+def _os():
+    """'windows', 'mac' or 'linux'. A function so tests can fake it without touching os/sys."""
+    if os.name == "nt":
+        return "windows"
+    return "mac" if sys.platform == "darwin" else "linux"
+
+
 def relaunch_elevated():
     """Start a new elevated copy. Returns a Popen to wait on (macOS), True (Windows), or raises."""
     argv = _relaunch_argv()
-    if os.name == "nt":
+    kind = _os()
+    if kind == "windows":
         import ctypes
         exe = argv[0]
         if exe.lower().endswith("python.exe"):  # no console window for the GUI
@@ -67,7 +75,7 @@ def relaunch_elevated():
         if rc <= 32:  # user cancelled UAC or launch failed
             raise OSError(f"Windows didn't start the elevated copy (code {rc}).")
         return True
-    if sys.platform == "darwin":
+    if kind == "mac":
         env = (f"DHCPOF_CONFIG_DIR={shlex.quote(profiles.config_dir())} "
                f"DHCPOF_OWNER={os.getuid()}:{os.getgid()} ")
         cmd = env + " ".join(shlex.quote(a) for a in argv) + " >/dev/null 2>&1 &"
@@ -610,7 +618,7 @@ class App(tk.Tk):
             self.show_sweep(*self.sweep_result)
 
     def offer_elevation(self, msg):
-        if os.name != "nt" and sys.platform != "darwin":
+        if _os() == "linux":
             messagebox.showerror(APP, f"{msg}\n\nClose this window and run:\n\n{sudo_hint()}")
             return
         if not messagebox.askyesno(APP, f"{msg}\n\n{APP} needs administrator rights to use the "

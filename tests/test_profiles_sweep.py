@@ -57,15 +57,19 @@ def test_owner_from_sudo_env(monkeypatch):
     assert profiles._owner() == (1000, 1000)
 
 
+def norm(p):
+    return p.replace("\\", "/")
+
+
 def test_platform_config_dirs(monkeypatch):
     monkeypatch.delenv("DHCPOF_CONFIG_DIR")
     monkeypatch.setattr(profiles, "_real_home", lambda: "/home/u")
-    monkeypatch.setattr(profiles.sys, "platform", "darwin")
-    monkeypatch.setattr(profiles.os, "name", "posix")
-    assert profiles.config_dir() == "/home/u/Library/Application Support/DHCP Options Finder"
-    monkeypatch.setattr(profiles.sys, "platform", "linux")
+    monkeypatch.setattr(profiles, "_os", lambda: "mac")
+    # Normalise separators: this runs on Windows CI too, where os.path.join uses "\\".
+    assert norm(profiles.config_dir()) == "/home/u/Library/Application Support/DHCP Options Finder"
+    monkeypatch.setattr(profiles, "_os", lambda: "linux")
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    assert profiles.config_dir() == "/home/u/.config/dhcp-options-finder"
+    assert norm(profiles.config_dir()) == "/home/u/.config/dhcp-options-finder"
 
 
 def run_cli(monkeypatch, *args):

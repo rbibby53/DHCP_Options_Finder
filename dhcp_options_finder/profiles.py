@@ -28,14 +28,21 @@ def _real_home():
     return os.path.expanduser("~")
 
 
+def _os():
+    """'windows', 'mac' or 'linux'. A function so tests can fake it without touching os/sys."""
+    if os.name == "nt":
+        return "windows"
+    return "mac" if sys.platform == "darwin" else "linux"
+
+
 def config_dir():
     if os.environ.get("DHCPOF_CONFIG_DIR"):
         return os.environ["DHCPOF_CONFIG_DIR"]
     home = _real_home()
-    if os.name == "nt":
+    if _os() == "windows":
         return os.path.join(os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming"),
                             "DHCP Options Finder")
-    if sys.platform == "darwin":
+    if _os() == "mac":
         return os.path.join(home, "Library", "Application Support", "DHCP Options Finder")
     xdg = os.environ.get("XDG_CONFIG_HOME") if not os.environ.get("SUDO_USER") else None
     return os.path.join(xdg or os.path.join(home, ".config"), "dhcp-options-finder")
