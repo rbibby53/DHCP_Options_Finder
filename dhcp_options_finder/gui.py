@@ -7,16 +7,34 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import __version__
+from . import __version__, profiles
 from .baseline import compare, load_baseline
-from .net import ProbeError, default_interface, is_admin, list_interfaces, parse_codes, parse_mac, probe
-from .report import format_json, format_text, summarize, to_record
+from .net import (
+    ProbeError,
+    default_interface,
+    is_admin,
+    list_interfaces,
+    parse_codes,
+    parse_mac,
+    probe,
+    sweep,
+)
+from .options import VENDOR_CLASS_PRESETS
+from .report import (
+    format_json,
+    format_sweep,
+    format_sweep_json,
+    format_text,
+    summarize,
+    sweep_summary,
+    to_record,
+)
 
 APP = "DHCP Options Finder"
 
-VENDOR_CLASSES = ["", "PXEClient", "MSFT 5.0", "OptiIpPhone", "Cisco AP c9130", "ubnt", "ArubaAP"]
+VENDOR_CLASSES = VENDOR_CLASS_PRESETS
 COLORS = {"warn": "#b26a00", "info": "#1f5fa8", "ok": "#2e7d32", "change": "#6a1b9a"}
 
 
@@ -50,7 +68,9 @@ def relaunch_elevated():
             raise OSError(f"Windows didn't start the elevated copy (code {rc}).")
         return True
     if sys.platform == "darwin":
-        cmd = " ".join(shlex.quote(a) for a in argv) + " >/dev/null 2>&1 &"
+        env = (f"DHCPOF_CONFIG_DIR={shlex.quote(profiles.config_dir())} "
+               f"DHCPOF_OWNER={os.getuid()}:{os.getgid()} ")
+        cmd = env + " ".join(shlex.quote(a) for a in argv) + " >/dev/null 2>&1 &"
         script = cmd.replace("\\", "\\\\").replace('"', '\\"')
         return subprocess.Popen(["osascript", "-e",
                                  f'do shell script "{script}" with administrator privileges'],
@@ -67,6 +87,15 @@ def _describe_change(c):
     return f"Since baseline: {name} changed from {c['was']} to {c['now']}"
 
 
+def _sweep_change(c):
+    name = f"{c['name']} ({c['option']})" if c["option"] is not None else c["name"]
+    if c["kind"] == "added":
+        return f"{name}: {c['now']}   (only with this class)"
+    if c["kind"] == "removed":
+        return f"{name}: not sent   (reference: {c['was']})"
+    return f"{name}: {c['now']}   (reference: {c['was']})"
+
+
 def sudo_hint():
     return "sudo -E " + " ".join(shlex.quote(a) for a in _relaunch_argv())
 
@@ -79,6 +108,7 @@ class App(tk.Tk):
         self.geometry("980x700")
         self.minsize(760, 520)
         self.replies = []
+        self.sweep_result = None  # (mac, [(vendor_class, replies)]) when the last run was a sweep
         self.baseline = None
         self.baseline_name = ""
         self.q = queue.Queue()
@@ -86,6 +116,7 @@ class App(tk.Tk):
         self._style()
         self._build()
         self.refresh_ifaces()
+        self._apply_settings(profiles.last())
         self._priv_check()
 
     def _set_icon(self):
@@ -107,8 +138,21 @@ class App(tk.Tk):
 
     def _build(self):
         pad = {"padx": 6, "pady": 4}
+        pf = ttk.Frame(self)
+        pf.pack(fill="x", padx=10, pady=(10, 0))
+        ttk.Label(pf, text="Profile").pack(side="left")
+        self.profile_var = tk.StringVar()
+        self.profile_cb = ttk.Combobox(pf, textvariable=self.profile_var, state="readonly", width=28)
+        self.profile_cb.pack(side="left", padx=6)
+        self.profile_cb.bind("<<ComboboxSelected>>", lambda e: self.load_profile())
+        ttk.Button(pf, text="Save As…", command=self.save_profile).pack(side="left")
+        ttk.Button(pf, text="Delete", command=self.delete_profile).pack(side="left", padx=4)
+        ttk.Label(pf, text="Your last settings are restored automatically.",
+                  style="Hint.TLabel").pack(side="left", padx=8)
+        self._refresh_profiles()
+
         cfg = ttk.LabelFrame(self, text="Query")
-        cfg.pack(fill="x", padx=10, pady=(10, 4))
+        cfg.pack(fill="x", padx=10, pady=(6, 4))
         for c in (1, 4):
             cfg.columnconfigure(c, weight=1)
 
@@ -165,6 +209,8 @@ class App(tk.Tk):
         bar.pack(fill="x", padx=10, pady=4)
         self.run_btn = ttk.Button(bar, text="Run Probe", command=self.run)
         self.run_btn.pack(side="left")
+        self.sweep_btn = ttk.Button(bar, text="Sweep Vendor Classes", command=self.run_sweep)
+        self.sweep_btn.pack(side="left", padx=(6, 0))
         self.prog = ttk.Progressbar(bar, mode="indeterminate", length=120)
         self.prog.pack(side="left", padx=8)
         self.status = tk.StringVar(value="Ready.")
@@ -226,37 +272,118 @@ class App(tk.Tk):
             self.warn.set(f"Not running as root, so probes will fail. Close this and run: {sudo_hint()}")
 
     # ------------------------------------------------------------ probe
-    def run(self):
-        if str(self.run_btn["state"]) == "disabled":
+    # ------------------------------------------------------------ settings & profiles
+    def _settings(self):
+        sel = self.iface_cb.current()
+        return {"iface": self.ifaces[sel]["name"] if 0 <= sel < len(self.ifaces) else None,
+                "mode": self.mode.get(), "mac": self.mac.get().strip(),
+                "use_iface_mac": self.use_iface_mac.get(), "vendor_class": self.vclass.get().strip(),
+                "hostname": self.hostname.get().strip(), "server": self.server.get().strip(),
+                "request": self.req.get().strip(), "timeout": self.timeout.get().strip()}
+
+    def _apply_settings(self, st):
+        if not st:
             return
+        names = [i["name"] for i in self.ifaces]
+        if st.get("iface") in names:
+            self.iface_cb.current(names.index(st["iface"]))
+        if st.get("mode") in ("discover", "inform"):
+            self.mode.set(st["mode"])
+        self.use_iface_mac.set(bool(st.get("use_iface_mac")))
+        for var, key, default in ((self.mac, "mac", ""), (self.vclass, "vendor_class", ""),
+                                  (self.hostname, "hostname", ""), (self.server, "server", ""),
+                                  (self.req, "request", "1-254"), (self.timeout, "timeout", "5")):
+            var.set(str(st.get(key, default)))
+
+    def _refresh_profiles(self, select=""):
+        self.profile_cb["values"] = profiles.names()
+        self.profile_var.set(select)
+
+    def load_profile(self):
+        st = profiles.get(self.profile_var.get())
+        if st:
+            self._apply_settings({"mac": "", "vendor_class": "", "hostname": "", "server": "",
+                                  "request": "1-254", "timeout": "5", **st})
+            self.status.set(f"Loaded profile {self.profile_var.get()!r}.")
+
+    def save_profile(self):
+        name = simpledialog.askstring(APP, "Profile name:", initialvalue=self.profile_var.get(),
+                                      parent=self)
+        if not name or not name.strip():
+            return
+        try:
+            profiles.put(name.strip(), self._settings())
+        except (OSError, ValueError) as e:
+            messagebox.showerror(APP, f"Couldn't save profile: {e}")
+            return
+        self._refresh_profiles(name.strip())
+        self.status.set(f"Saved profile {name.strip()!r}.")
+
+    def delete_profile(self):
+        name = self.profile_var.get()
+        if name and messagebox.askyesno(APP, f"Delete profile {name!r}?"):
+            profiles.delete(name)
+            self._refresh_profiles()
+
+    # ------------------------------------------------------------ probe
+    def _probe_kwargs(self):
         sel = self.iface_cb.current()
         if sel < 0:
             messagebox.showerror(APP, "Pick an interface.")
-            return
+            return None
         try:
-            kw = dict(
+            return dict(
                 iface=self.ifaces[sel], mode=self.mode.get(),
                 mac=parse_mac(self.mac.get().strip()) if self.mac.get().strip() else None,
                 use_iface_mac=self.use_iface_mac.get(),
-                vendor_class=self.vclass.get().strip() or None,
                 hostname=self.hostname.get().strip() or None,
                 request=parse_codes(self.req.get()) or list(range(1, 255)),
                 server=self.server.get().strip() or None,
-                timeout=float(self.timeout.get()), first=self.first.get(),
-                log=lambda m: self.q.put(("log", m)))
+                timeout=float(self.timeout.get()))
         except ValueError as e:
             messagebox.showerror(APP, f"Bad input: {e}")
-            return
-        self.run_btn.state(["disabled"])
+            return None
+
+    def _busy(self):
+        return str(self.run_btn["state"]) == "disabled"
+
+    def _start(self, kind, fn, kw):
+        profiles.save_last(self._settings())
+        for b in (self.run_btn, self.sweep_btn):
+            b.state(["disabled"])
         self.prog.start(12)
         self.warn.set("")
         self._priv_check()
-        threading.Thread(target=self._worker, args=(kw,), daemon=True).start()
+        threading.Thread(target=self._worker, args=(kind, fn, kw), daemon=True).start()
         self.after(100, self._poll)
 
-    def _worker(self, kw):
+    def run(self):
+        if self._busy():
+            return
+        kw = self._probe_kwargs()
+        if kw is None:
+            return
+        kw.update(vendor_class=self.vclass.get().strip() or None, first=self.first.get(),
+                  log=lambda m: self.q.put(("log", m)))
+        self._start("done", probe, kw)
+
+    def run_sweep(self):
+        if self._busy():
+            return
+        kw = self._probe_kwargs()
+        if kw is None:
+            return
+        classes = list(VENDOR_CLASS_PRESETS)
+        custom = self.vclass.get().strip()
+        if custom and custom not in classes:
+            classes.append(custom)
+        kw.update(classes=classes, progress=lambda n, total, vc: self.q.put(
+            ("log", f"Sweep {n}/{total}: {vc or '(no option 60)'}…")))
+        self._start("sweep", lambda classes, **k: sweep(classes, **k), kw)
+
+    def _worker(self, kind, fn, kw):
         try:
-            self.q.put(("done", probe(**kw)))
+            self.q.put((kind, fn(**kw)))
         except ProbeError as e:
             self.q.put(("error", (str(e), e.permission)))
         except Exception as e:  # surface anything unexpected instead of hanging
@@ -270,7 +397,8 @@ class App(tk.Tk):
                     self.status.set(val)
                     continue
                 self.prog.stop()
-                self.run_btn.state(["!disabled"])
+                for b in (self.run_btn, self.sweep_btn):
+                    b.state(["!disabled"])
                 if kind == "error":
                     self.status.set("Failed.")
                     msg, permission = val
@@ -278,6 +406,8 @@ class App(tk.Tk):
                         self.offer_elevation(msg)
                     else:
                         messagebox.showerror(APP, msg)
+                elif kind == "sweep":
+                    self.show_sweep(*val)
                 else:
                     self.show(val)
                 return
@@ -288,6 +418,7 @@ class App(tk.Tk):
     # ------------------------------------------------------------ results
     def show(self, replies):
         self.replies = replies
+        self.sweep_result = None
         self._placeholder()
         if not replies:
             self.status.set("No replies.")
@@ -308,15 +439,85 @@ class App(tk.Tk):
             self.warn.set(f"Multiple DHCP servers answered: {', '.join(servers)}. "
                           "Check for a rogue server if that isn't expected.")
 
-    def _add_tab(self, n, s):
+    def show_sweep(self, mac, results):
+        self.replies = []
+        self.sweep_result = (mac, results)
+        self._placeholder()
+        self.nb.forget(self.nb.tabs()[0])
+        summary = sweep_summary(results)
+
+        f = ttk.Frame(self.nb)
+        ttk.Label(f, text=f"Vendor class sweep: {len(results)} probes, all with client MAC "
+                          f"{':'.join(f'{b:02x}' for b in mac)}",
+                  font=("TkDefaultFont", 11, "bold")).pack(anchor="w", padx=6, pady=(6, 2))
+        ref = summary["reference"]
+        ttk.Label(f, text=("No class got a reply." if ref is None else
+                           f"Each class is compared with the reply to {ref or 'no option 60'!r}. "
+                           "Double-click a class to open its full reply."),
+                  style="Hint.TLabel").pack(anchor="w", padx=8)
+        wrap = ttk.Frame(f)
+        wrap.pack(fill="both", expand=True, padx=6, pady=6)
+        tv = ttk.Treeview(wrap, columns=("result",), show="tree headings")
+        tv.heading("#0", text="Vendor class (60)")
+        tv.column("#0", width=220, stretch=False)
+        tv.heading("result", text="Result")
+        tv.column("result", width=700)
+        ys = ttk.Scrollbar(wrap, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=ys.set)
+        tv.grid(row=0, column=0, sticky="nsew")
+        ys.grid(row=0, column=1, sticky="ns")
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+        tv.tag_configure("differs", background="#fff3c4")
+        tv.tag_configure("none", foreground="#888888")
+        self.nb.add(f, text="Sweep")
+
+        tabs = {}
+        for r in summary["rows"]:
+            label = r["vendor_class"] or "(none)"
+            if r["status"] == "reference":
+                rec = r["replies"][0]
+                text = f"Reference: {len(rec['options'])} options from {rec['server_id'] or rec['source']}"
+            elif r["status"] == "no reply":
+                text = "No reply"
+            elif r["status"] == "same":
+                text = "Same as reference"
+            else:
+                n = len(r["changes"])
+                text = f"{n} difference{'s' if n != 1 else ''}"
+            iid = tv.insert("", "end", text=label, values=(text,), open=True,
+                            tags=("differs",) if r["status"] == "differs" else
+                            ("none",) if r["status"] == "no reply" else ())
+            for c in r["changes"]:
+                tv.insert(iid, "end", text="", values=(_sweep_change(c),), tags=("differs",))
+            if r["replies"]:
+                vc = r["vendor_class"]
+                p = next(p for v, rs in results if v == vc for p in rs[:1])
+                self._add_tab(0, summarize(p), label=label, use_baseline=False)
+                tabs[iid] = self.nb.tabs()[-1]
+
+        def open_tab(_e):
+            iid = tv.focus()
+            iid = tv.parent(iid) or iid
+            if iid in tabs:
+                self.nb.select(tabs[iid])
+        tv.bind("<Double-1>", open_tab)
+        answered = sum(1 for _, rs in results if rs)
+        differs = sum(1 for r in summary["rows"] if r["status"] == "differs")
+        self.status.set(f"Sweep done: {answered}/{len(results)} classes answered, "
+                        f"{differs} got different options.")
+
+    def _add_tab(self, n, s, label=None, use_baseline=True):
         f = ttk.Frame(self.nb)
         head = f"DHCP{s['type']} from {s['source']}   Server ID: {s['server_id'] or '-'}"
+        if label:
+            head = f"Vendor class {label}:  " + head
         ttk.Label(f, text=head, font=("TkDefaultFont", 11, "bold")).pack(
             anchor="w", padx=6, pady=(6, 2))
         changes = []
-        if self.baseline is not None and n == 1:
+        if use_baseline and self.baseline is not None and n == 1:
             changes = compare(to_record(self.replies[0]), self.baseline)
-        self._findings_panel(f, s["findings"], changes)
+        self._findings_panel(f, s["findings"], changes if use_baseline else None)
 
         wrap = ttk.Frame(f)
         wrap.pack(fill="both", expand=True, padx=6, pady=6)
@@ -345,8 +546,8 @@ class App(tk.Tk):
         kinds = {c["option"]: c["kind"] for c in changes if c["option"] is not None}
 
         if s["header"]:
-            for label, v in s["header"]:
-                tv.insert("", "end", text="BOOTP", values=(label, v, ""), tags=("hdr",))
+            for field, v in s["header"]:
+                tv.insert("", "end", text="BOOTP", values=(field, v, ""), tags=("hdr",))
         for o in s["options"]:
             tag = (kinds[o["code"]],) if o["code"] in kinds else ()
             iid = tv.insert("", "end", text=str(o["code"]),
@@ -365,7 +566,7 @@ class App(tk.Tk):
         tv.bind(f"<{mod}-c>", lambda e, t=tv: self._copy_rows(t))
         self.trees.append(tv)
         self._apply_raw(tv)
-        self.nb.add(f, text=f"{n}: {s['source']} ({s['type']})")
+        self.nb.add(f, text=label or f"{n}: {s['source']} ({s['type']})")
 
     def _findings_panel(self, parent, findings, changes):
         box = ttk.Frame(parent)
@@ -405,6 +606,8 @@ class App(tk.Tk):
             self.base_lbl.set(f"Baseline: {self.baseline_name}")
         if self.replies:
             self.show(self.replies)
+        elif self.sweep_result:
+            self.show_sweep(*self.sweep_result)
 
     def offer_elevation(self, msg):
         if os.name != "nt" and sys.platform != "darwin":
@@ -471,24 +674,31 @@ class App(tk.Tk):
         txt.configure(state="disabled")
 
     # ------------------------------------------------------------ export
+    def _export(self, kind):
+        if self.sweep_result:
+            return (format_sweep_json if kind == "json" else format_sweep)(*self.sweep_result)
+        if kind == "json":
+            return format_json(self.replies)
+        return format_text(self.replies, self.show_raw.get(), self.baseline)
+
     def copy_text(self):
-        if not self.replies:
+        if not (self.replies or self.sweep_result):
             return
         self.clipboard_clear()
-        self.clipboard_append(format_text(self.replies, self.show_raw.get(), self.baseline))
+        self.clipboard_append(self._export("txt"))
         self.status.set("Copied results to clipboard.")
 
     def save(self, kind):
-        if not self.replies:
+        if not (self.replies or self.sweep_result):
             messagebox.showinfo(APP, "Nothing to save yet.")
             return
+        stem = "dhcp-sweep" if self.sweep_result else "dhcp-options"
         path = filedialog.asksaveasfilename(
-            defaultextension=f".{kind}", initialfile=f"dhcp-options.{kind}",
+            defaultextension=f".{kind}", initialfile=f"{stem}.{kind}",
             filetypes=[("JSON", "*.json")] if kind == "json" else [("Text", "*.txt")])
         if not path:
             return
-        data = (format_json(self.replies) if kind == "json"
-                else format_text(self.replies, self.show_raw.get(), self.baseline))
+        data = self._export(kind)
         with open(path, "w", encoding="utf-8") as f:
             f.write(data)
         self.status.set(f"Saved {os.path.basename(path)}")
