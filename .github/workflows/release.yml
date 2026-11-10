@@ -4,6 +4,10 @@ name: Release
 # matching vX.Y.Z tag yet, this builds every platform, creates the tag and
 # publishes the GitHub Release. Pushing a v* tag by hand still works too.
 # workflow_dispatch builds the apps as artifacts without publishing.
+#
+# macOS signing + notarization run only when the MACOS_CERT_P12 secret exists
+# (see docs/macos-signing.md); otherwise the Mac build is unsigned, as before.
+# Third-party actions are pinned to commit SHAs; Dependabot keeps them current.
 
 on:
   push:
@@ -12,7 +16,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -26,8 +30,8 @@ jobs:
       build: ${{ steps.v.outputs.build }}
       publish: ${{ steps.v.outputs.publish }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.15"
       - id: v
@@ -75,9 +79,11 @@ jobs:
           - { name: windows-x64, os: windows-latest }
           - { name: macos-arm64, os: macos-latest }
           - { name: linux-x64,   os: ubuntu-24.04 }   # glibc 2.39: Fedora 40+, Ubuntu 24.04+, Debian 13, RHEL 10
+    env:
+      MACOS_SIGN: ${{ secrets.MACOS_CERT_P12 != '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.15"
           cache: pip
@@ -96,16 +102,53 @@ jobs:
           cp dist/DHCPOptionsFinder.exe "out/DHCPOptionsFinder-${{ matrix.name }}.exe"
           cp dist/dhcpprobe.exe "out/dhcpprobe-cli-${{ matrix.name }}.exe"
 
+      - name: Import signing certificate (macOS)
+        if: runner.os == 'macOS' && env.MACOS_SIGN == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: .github/macos/import-certificate.sh
+
       - name: Build (macOS)
         if: runner.os == 'macOS'
         run: |
-          pyinstaller --noconfirm --windowed --name DHCPOptionsFinder \
+          sign=()
+          if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
+            sign=(--codesign-identity "$MACOS_SIGN_IDENTITY" --osx-entitlements-file .github/macos/entitlements.plist)
+          fi
+          pyinstaller --noconfirm --windowed --name DHCPOptionsFinder "${sign[@]}" \
             --icon assets/icon.png --add-data "dhcp_options_finder/assets/icon.png:dhcp_options_finder/assets" \
             --osx-bundle-identifier dev.bibby.dhcpoptionsfinder dhcpprobe_gui.py
-          pyinstaller --noconfirm --onefile --name dhcpprobe dhcpprobe.py
+          pyinstaller --noconfirm --onefile --name dhcpprobe "${sign[@]}" dhcpprobe.py
+          codesign --verify --deep --strict --verbose=2 dist/DHCPOptionsFinder.app
+          codesign --display --verbose=2 dist/DHCPOptionsFinder.app 2>&1 | grep -E "Authority|flags|TeamIdentifier" || true
+
+      - name: Notarize (macOS)
+        if: runner.os == 'macOS' && env.MACOS_SIGN == 'true'
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          ditto -c -k --keepParent dist/DHCPOptionsFinder.app "$RUNNER_TEMP/app.zip"
+          .github/macos/notarize.sh "$RUNNER_TEMP/app.zip"
+          xcrun stapler staple dist/DHCPOptionsFinder.app
+          xcrun stapler validate dist/DHCPOptionsFinder.app
+          spctl --assess --type execute --verbose=4 dist/DHCPOptionsFinder.app
+          # A bare binary can't hold a stapled ticket; Gatekeeper checks it online on first run.
+          ditto -c -k dist/dhcpprobe "$RUNNER_TEMP/cli.zip"
+          .github/macos/notarize.sh "$RUNNER_TEMP/cli.zip"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
           mkdir out
           ditto -c -k --keepParent dist/DHCPOptionsFinder.app "out/DHCPOptionsFinder-${{ matrix.name }}.zip"
           tar -czf "out/dhcpprobe-cli-${{ matrix.name }}.tar.gz" -C dist dhcpprobe
+
+      - name: Remove signing keychain (macOS)
+        if: always() && runner.os == 'macOS' && env.MACOS_KEYCHAIN != ''
+        run: security delete-keychain "$MACOS_KEYCHAIN"
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
@@ -117,18 +160,46 @@ jobs:
           tar -czf "out/DHCPOptionsFinder-${{ matrix.name }}.tar.gz" -C dist DHCPOptionsFinder
           tar -czf "out/dhcpprobe-cli-${{ matrix.name }}.tar.gz" -C dist dhcpprobe
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: DHCPOptionsFinder-${{ matrix.name }}
           path: out/*
           if-no-files-found: error
 
-  publish:
-    needs: [version, build]
-    if: needs.version.outputs.publish == 'true'
+  wheel:
+    needs: version
+    if: needs.version.outputs.build == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15"
+      - run: pip install build
+      - run: python -m build --wheel --outdir out
+      - name: Install and smoke-test the wheel
+        run: |
+          pip install out/*.whl
+          dhcpprobe --version
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: DHCPOptionsFinder-wheel
+          path: out/*.whl
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build, wheel]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # create the tag and release
+      id-token: write          # sign build provenance (Sigstore)
+      attestations: write      # store the attestations
+      artifact-metadata: write
+    env:
+      MACOS_SIGN: ${{ secrets.MACOS_CERT_P12 != '' && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Release notes from CHANGELOG
         env:
           TAG: ${{ needs.version.outputs.tag }}
@@ -140,26 +211,39 @@ jobs:
             on && /^\[/ {exit}
             on {print}
           ' CHANGELOG.md > notes.md
-          cat >> notes.md <<'MD'
+          if [ "$MACOS_SIGN" = "true" ]; then
+            mac="The macOS app is signed with a Developer ID and notarized by Apple."
+          else
+            mac="The macOS app is unsigned; see the README for the Gatekeeper workaround."
+          fi
+          cat >> notes.md <<MD
 
           ### Downloads
           | OS | File |
           |---|---|
-          | Windows x64 | `DHCPOptionsFinder-windows-x64.exe` |
-          | macOS (Apple silicon) | `DHCPOptionsFinder-macos-arm64.zip` |
-          | Linux x64 | `DHCPOptionsFinder-linux-x64.tar.gz` |
+          | Windows x64 | \`DHCPOptionsFinder-windows-x64.exe\` |
+          | macOS (Apple silicon) | \`DHCPOptionsFinder-macos-arm64.zip\` |
+          | Linux x64 | \`DHCPOptionsFinder-linux-x64.tar.gz\` |
+          | Python (pipx) | \`dhcp_options_finder-${ver}-py3-none-any.whl\` |
 
-          CLI-only builds are the `dhcpprobe-cli-*` files. Verify downloads against `SHA256SUMS.txt`. Builds are unsigned; see the README for the Gatekeeper/SmartScreen workaround.
+          CLI-only builds are the \`dhcpprobe-cli-*\` files. $mac Windows builds are unsigned (SmartScreen will warn).
+
+          Verify a download: compare it with \`SHA256SUMS.txt\`, or check it was built by this repo's workflow with
+          \`gh attestation verify <file> -R ${{ github.repository }}\`.
           MD
           sed -i 's/^          //' notes.md
           cat notes.md
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: out
           merge-multiple: true
       - name: Checksums
-        run: cd out && sha256sum * > SHA256SUMS.txt
-      - uses: softprops/action-gh-release@v3
+        run: cd out && sha256sum -- * > SHA256SUMS.txt
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: out/*
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: ${{ needs.version.outputs.tag }}
           target_commitish: ${{ github.sha }}

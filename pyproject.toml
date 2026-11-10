@@ -1,10 +1,15 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "dhcp-options-finder"
-version = "0.2.0"
+version = "0.3.0"
 description = "Query DHCP servers and decode every option they hand out. Cross-platform GUI + CLI."
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
+authors = [{ name = "Ryan J. Bibby" }]
 dependencies = ["psutil>=7.2"]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -18,6 +23,23 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Topic :: System :: Networking",
 ]
+
+[project.urls]
+Homepage = "https://github.com/rbibby53/DHCP_Options_Finder"
+Releases = "https://github.com/rbibby53/DHCP_Options_Finder/releases"
+Issues = "https://github.com/rbibby53/DHCP_Options_Finder/issues"
+
+[project.scripts]
+dhcpprobe = "dhcp_options_finder.cli:main"
+
+[project.gui-scripts]
+dhcp-options-finder = "dhcp_options_finder.gui:main"
+
+[tool.setuptools]
+packages = ["dhcp_options_finder"]
+
+[tool.setuptools.package-data]
+dhcp_options_finder = ["assets/*.png"]
 
 [tool.ruff]
 line-length = 110
