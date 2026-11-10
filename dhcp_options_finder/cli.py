@@ -5,8 +5,10 @@ import sys
 from . import __version__, profiles
 from .baseline import compare, load_baseline
 from .net import ProbeError, default_interface, list_interfaces, parse_codes, parse_mac, probe, sweep
+from .net6 import probe6
 from .options import VENDOR_CLASS_PRESETS
 from .report import format_json, format_sweep, format_sweep_json, format_text, to_record
+from .report6 import format_json6, format_text6
 
 # Settings a profile can supply. CLI flags win; then the profile; then these defaults.
 DEFAULTS = {"iface": None, "mode": "discover", "mac": None, "vendor_class": None, "hostname": None,
@@ -38,6 +40,16 @@ def _parser():
     ap.add_argument("-1", "--first", action="store_true", help="stop after the first reply")
     ap.add_argument("-x", "--hex", action="store_true", help="also show raw hex for each option")
     ap.add_argument("-j", "--json", action="store_true", help="JSON output")
+
+    g = ap.add_argument_group("IPv6")
+    g.add_argument("-6", "--ipv6", action="store_true",
+                   help="probe IPv6 instead: Router Advertisements plus DHCPv6 Information-Request "
+                        "and Solicit (no lease taken)")
+    g.add_argument("--no-ra", action="store_true", help="IPv6: don't listen for Router Advertisements")
+    g.add_argument("--no-dhcpv6", action="store_true", help="IPv6: skip DHCPv6 entirely")
+    g.add_argument("--no-solicit", action="store_true",
+                   help="IPv6: only ask for options (Information-Request), not addresses")
+    g.add_argument("--pd", action="store_true", help="IPv6: also ask for a delegated prefix (IA_PD)")
 
     g = ap.add_argument_group("baselines")
     g.add_argument("-b", "--baseline", metavar="FILE",
@@ -119,6 +131,16 @@ def main():
                       hostname=st["hostname"], request=parse_codes(st["request"]),
                       server=st["server"], server_port=a.server_port, ciaddr=a.ciaddr,
                       timeout=st["timeout"])
+
+        if a.ipv6:
+            if a.sweep or a.sweep_classes is not None or a.baseline or a.save_baseline:
+                raise ValueError("--sweep and baselines are IPv4-only for now.")
+            res = probe6(iface=st["iface"], ra_on=not a.no_ra, info=not a.no_dhcpv6,
+                         solicit=not (a.no_dhcpv6 or a.no_solicit), pd=a.pd, timeout=st["timeout"],
+                         mac=mac, use_iface_mac=use_iface, server=st["server"],
+                         server_port=a.server_port if a.server_port != 67 else 547, log=log)
+            print(format_json6(res) if a.json else format_text6(res, a.hex))
+            sys.exit(0 if res["routers"] or res["dhcpv6"] else 1)
 
         if a.sweep or a.sweep_classes is not None:
             classes = (VENDOR_CLASS_PRESETS if a.sweep_classes is None

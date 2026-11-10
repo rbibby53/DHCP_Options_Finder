@@ -9,7 +9,8 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import __version__, profiles
+from . import __version__, profiles, ra
+from . import dhcpv6 as d6
 from .baseline import compare, load_baseline
 from .net import (
     ProbeError,
@@ -21,6 +22,7 @@ from .net import (
     probe,
     sweep,
 )
+from .net6 import probe6
 from .options import VENDOR_CLASS_PRESETS
 from .report import (
     format_json,
@@ -31,6 +33,7 @@ from .report import (
     sweep_summary,
     to_record,
 )
+from .report6 import check6, format_json6, format_text6
 
 APP = "DHCP Options Finder"
 
@@ -117,6 +120,7 @@ class App(tk.Tk):
         self.minsize(760, 520)
         self.replies = []
         self.sweep_result = None  # (mac, [(vendor_class, replies)]) when the last run was a sweep
+        self.v6_result = None     # probe6() result when the last run was IPv6
         self.baseline = None
         self.baseline_name = ""
         self.q = queue.Queue()
@@ -174,17 +178,20 @@ class App(tk.Tk):
         mf = ttk.Frame(cfg)
         mf.grid(row=1, column=1, sticky="w", **pad)
         self.mode = tk.StringVar(value="discover")
-        ttk.Radiobutton(mf, text="Discover (new client)", value="discover",
-                        variable=self.mode).pack(side="left")
-        ttk.Radiobutton(mf, text="Inform (host has IP)", value="inform",
-                        variable=self.mode).pack(side="left", padx=(10, 0))
+        self.v4_only = []
+        for text, val, padx in (("Discover (new client)", "discover", 0),
+                                ("Inform (host has IP)", "inform", 10)):
+            rb = ttk.Radiobutton(mf, text=text, value=val, variable=self.mode)
+            rb.pack(side="left", padx=(padx, 0))
+            self.v4_only.append(rb)
         ttk.Label(cfg, text="Timeout (s)").grid(row=1, column=3, sticky="e", **pad)
         self.timeout = tk.StringVar(value="5")
         ttk.Spinbox(cfg, from_=1, to=60, width=6, textvariable=self.timeout).grid(
             row=1, column=4, sticky="w", **pad)
         self.first = tk.BooleanVar(value=False)
-        ttk.Checkbutton(cfg, text="Stop at first reply", variable=self.first).grid(
-            row=1, column=5, sticky="w", **pad)
+        w = ttk.Checkbutton(cfg, text="Stop at first reply", variable=self.first)
+        w.grid(row=1, column=5, sticky="w", **pad)
+        self.v4_only.append(w)
 
         ttk.Label(cfg, text="Client MAC").grid(row=2, column=0, sticky="w", **pad)
         macf = ttk.Frame(cfg)
@@ -196,12 +203,15 @@ class App(tk.Tk):
             side="left", padx=(6, 0))
         ttk.Label(cfg, text="Vendor class (60)").grid(row=2, column=3, sticky="e", **pad)
         self.vclass = tk.StringVar()
-        ttk.Combobox(cfg, textvariable=self.vclass, values=VENDOR_CLASSES).grid(
-            row=2, column=4, columnspan=2, sticky="ew", **pad)
+        w = ttk.Combobox(cfg, textvariable=self.vclass, values=VENDOR_CLASSES)
+        w.grid(row=2, column=4, columnspan=2, sticky="ew", **pad)
+        self.v4_only.append(w)
 
         ttk.Label(cfg, text="Hostname (12)").grid(row=3, column=0, sticky="w", **pad)
         self.hostname = tk.StringVar()
-        ttk.Entry(cfg, textvariable=self.hostname).grid(row=3, column=1, sticky="ew", **pad)
+        w = ttk.Entry(cfg, textvariable=self.hostname)
+        w.grid(row=3, column=1, sticky="ew", **pad)
+        self.v4_only.append(w)
         ttk.Label(cfg, text="Unicast to server").grid(row=3, column=3, sticky="e", **pad)
         self.server = tk.StringVar()
         ttk.Entry(cfg, textvariable=self.server).grid(row=3, column=4, columnspan=2,
@@ -209,9 +219,31 @@ class App(tk.Tk):
 
         ttk.Label(cfg, text="Request options").grid(row=4, column=0, sticky="w", **pad)
         self.req = tk.StringVar(value="1-254")
-        ttk.Entry(cfg, textvariable=self.req).grid(row=4, column=1, sticky="ew", **pad)
+        w = ttk.Entry(cfg, textvariable=self.req)
+        w.grid(row=4, column=1, sticky="ew", **pad)
+        self.v4_only.append(w)
         ttk.Label(cfg, text="Blank MAC: random for Discover. Blank server: broadcast.",
                   style="Hint.TLabel").grid(row=4, column=3, columnspan=3, sticky="w", **pad)
+
+        ttk.Label(cfg, text="Protocol").grid(row=5, column=0, sticky="w", **pad)
+        pf6 = ttk.Frame(cfg)
+        pf6.grid(row=5, column=1, columnspan=5, sticky="w", **pad)
+        self.family = tk.StringVar(value="ipv4")
+        for text, val in (("IPv4 (DHCP)", "ipv4"), ("IPv6 (RA + DHCPv6)", "ipv6")):
+            ttk.Radiobutton(pf6, text=text, value=val, variable=self.family,
+                            command=self._family_changed).pack(side="left", padx=(0, 10))
+        ttk.Label(cfg, text="IPv6 checks").grid(row=6, column=0, sticky="w", **pad)
+        pf6b = ttk.Frame(cfg)
+        pf6b.grid(row=6, column=1, columnspan=5, sticky="w", **pad)
+        self.v6_ra, self.v6_info = tk.BooleanVar(value=True), tk.BooleanVar(value=True)
+        self.v6_solicit, self.v6_pd = tk.BooleanVar(value=True), tk.BooleanVar(value=False)
+        self.v6_only = []
+        for text, var in (("Router Advertisements", self.v6_ra), ("DHCPv6 options", self.v6_info),
+                          ("DHCPv6 address (Solicit)", self.v6_solicit),
+                          ("Prefix delegation (IA_PD)", self.v6_pd)):
+            cb = ttk.Checkbutton(pf6b, text=text, variable=var)
+            cb.pack(side="left", padx=(0, 8))
+            self.v6_only.append(cb)
 
         bar = ttk.Frame(self)
         bar.pack(fill="x", padx=10, pady=4)
@@ -219,6 +251,7 @@ class App(tk.Tk):
         self.run_btn.pack(side="left")
         self.sweep_btn = ttk.Button(bar, text="Sweep Vendor Classes", command=self.run_sweep)
         self.sweep_btn.pack(side="left", padx=(6, 0))
+        self.v4_only.append(self.sweep_btn)
         self.prog = ttk.Progressbar(bar, mode="indeterminate", length=120)
         self.prog.pack(side="left", padx=8)
         self.status = tk.StringVar(value="Ready.")
@@ -242,6 +275,7 @@ class App(tk.Tk):
         ttk.Button(bot, text="Save JSON…", command=lambda: self.save("json")).pack(side="left")
         self.base_btn = ttk.Button(bot, text="Compare to Baseline…", command=self.toggle_baseline)
         self.base_btn.pack(side="left", padx=(12, 0))
+        self.v4_only.append(self.base_btn)
         self.base_lbl = tk.StringVar()
         ttk.Label(bot, textvariable=self.base_lbl, style="Hint.TLabel").pack(side="left", padx=6)
         ttk.Label(bot, text="Double-click a row for the full value.",
@@ -287,7 +321,9 @@ class App(tk.Tk):
                 "mode": self.mode.get(), "mac": self.mac.get().strip(),
                 "use_iface_mac": self.use_iface_mac.get(), "vendor_class": self.vclass.get().strip(),
                 "hostname": self.hostname.get().strip(), "server": self.server.get().strip(),
-                "request": self.req.get().strip(), "timeout": self.timeout.get().strip()}
+                "request": self.req.get().strip(), "timeout": self.timeout.get().strip(),
+                "family": self.family.get(), "v6_ra": self.v6_ra.get(), "v6_info": self.v6_info.get(),
+                "v6_solicit": self.v6_solicit.get(), "v6_pd": self.v6_pd.get()}
 
     def _apply_settings(self, st):
         if not st:
@@ -302,6 +338,18 @@ class App(tk.Tk):
                                   (self.hostname, "hostname", ""), (self.server, "server", ""),
                                   (self.req, "request", "1-254"), (self.timeout, "timeout", "5")):
             var.set(str(st.get(key, default)))
+        self.family.set(st.get("family", "ipv4") if st.get("family") in ("ipv4", "ipv6") else "ipv4")
+        for var, key, default in ((self.v6_ra, "v6_ra", True), (self.v6_info, "v6_info", True),
+                                  (self.v6_solicit, "v6_solicit", True), (self.v6_pd, "v6_pd", False)):
+            var.set(bool(st.get(key, default)))
+        self._family_changed()
+
+    def _family_changed(self):
+        v6 = self.family.get() == "ipv6"
+        for w in self.v4_only:
+            w.state(["disabled"] if v6 else ["!disabled"])
+        for w in self.v6_only:
+            w.state(["!disabled"] if v6 else ["disabled"])
 
     def _refresh_profiles(self, select=""):
         self.profile_cb["values"] = profiles.names()
@@ -371,6 +419,16 @@ class App(tk.Tk):
         kw = self._probe_kwargs()
         if kw is None:
             return
+        if self.family.get() == "ipv6":
+            if not (self.v6_ra.get() or self.v6_info.get() or self.v6_solicit.get()):
+                messagebox.showerror(APP, "Tick at least one IPv6 check.")
+                return
+            self._start("v6", probe6, dict(
+                iface=kw["iface"], timeout=kw["timeout"], mac=kw["mac"],
+                use_iface_mac=kw["use_iface_mac"], server=kw["server"], ra_on=self.v6_ra.get(),
+                info=self.v6_info.get(), solicit=self.v6_solicit.get(), pd=self.v6_pd.get(),
+                log=lambda m: self.q.put(("log", m))))
+            return
         kw.update(vendor_class=self.vclass.get().strip() or None, first=self.first.get(),
                   log=lambda m: self.q.put(("log", m)))
         self._start("done", probe, kw)
@@ -405,8 +463,9 @@ class App(tk.Tk):
                     self.status.set(val)
                     continue
                 self.prog.stop()
-                for b in (self.run_btn, self.sweep_btn):
-                    b.state(["!disabled"])
+                self.run_btn.state(["!disabled"])
+                if self.family.get() == "ipv4":
+                    self.sweep_btn.state(["!disabled"])
                 if kind == "error":
                     self.status.set("Failed.")
                     msg, permission = val
@@ -416,6 +475,8 @@ class App(tk.Tk):
                         messagebox.showerror(APP, msg)
                 elif kind == "sweep":
                     self.show_sweep(*val)
+                elif kind == "v6":
+                    self.show6(val)
                 else:
                     self.show(val)
                 return
@@ -426,7 +487,7 @@ class App(tk.Tk):
     # ------------------------------------------------------------ results
     def show(self, replies):
         self.replies = replies
-        self.sweep_result = None
+        self.sweep_result = self.v6_result = None
         self._placeholder()
         if not replies:
             self.status.set("No replies.")
@@ -447,8 +508,73 @@ class App(tk.Tk):
             self.warn.set(f"Multiple DHCP servers answered: {', '.join(servers)}. "
                           "Check for a rogue server if that isn't expected.")
 
+    def _tree(self, parent, columns, headings, widths):
+        wrap = ttk.Frame(parent)
+        wrap.pack(fill="both", expand=True, padx=6, pady=6)
+        tv = ttk.Treeview(wrap, columns=columns, show="tree headings")
+        for col, head, width in zip(("#0", *columns), headings, widths, strict=True):
+            tv.heading(col, text=head)
+            tv.column(col, width=width, stretch=col == columns[-1])
+        ys = ttk.Scrollbar(wrap, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=ys.set)
+        tv.grid(row=0, column=0, sticky="nsew")
+        ys.grid(row=0, column=1, sticky="ns")
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+        tv.tag_configure("head", font=("TkDefaultFont", 10, "bold"))
+        return tv
+
+    def show6(self, res):
+        self.replies, self.sweep_result, self.v6_result = [], None, res
+        self._placeholder()
+        self.nb.forget(self.nb.tabs()[0])
+        findings = check6(res)
+
+        f = ttk.Frame(self.nb)
+        ttk.Label(f, text=f"IPv6 on {res['iface']}   link-local {res['link_local']}",
+                  font=("TkDefaultFont", 11, "bold")).pack(anchor="w", padx=6, pady=(6, 2))
+        if res.get("ra_source") == "windows":
+            dns = f" IPv6 DNS in use: {', '.join(res['os_dns'])}." if res.get("os_dns") else ""
+            ttk.Label(f, text="Windows doesn't let apps read Router Advertisements; routers below are "
+                              f"what Windows learned from them.{dns}",
+                      style="Hint.TLabel", wraplength=900).pack(anchor="w", padx=8)
+        self._findings_panel(f, findings, None)
+        tv = self._tree(f, ("value",), ("Router", "Value"), (300, 640))
+        if not res["routers"]:
+            why = res["errors"].get("ra") or ("not checked" if not res["ran"]["ra"] else
+                                             "no Router Advertisements received")
+            tv.insert("", "end", text="(none)", values=(why,))
+        for r in res["routers"]:
+            default = r["ra"]["router_lifetime"] > 0
+            iid = tv.insert("", "end", text=r["source"], open=True, tags=("head",),
+                            values=("default router" if default else "not a default router",))
+            for label, value in ra.describe(r["ra"]):
+                tv.insert(iid, "end", text=label, values=(value,))
+        self.nb.add(f, text=f"Routers ({len(res['routers'])})")
+
+        f = ttk.Frame(self.nb)
+        tv = self._tree(f, ("name", "value"), ("Code", "Option", "Value"), (80, 260, 600))
+        if not res["dhcpv6"]:
+            why = res["errors"].get("dhcpv6") or ("not checked" if not res["ran"]["dhcpv6"] else
+                                                 "no DHCPv6 server answered")
+            tv.insert("", "end", text="", values=("(none)", why))
+        for m in res["dhcpv6"]:
+            sm = d6.summarize(m)
+            pref = f", preference {sm['preference']}" if sm["preference"] is not None else ""
+            iid = tv.insert("", "end", text="", open=True, tags=("head",),
+                            values=(f"{sm['type']} to {m['request']}", f"from {m['source']}{pref}"))
+            for o in sm["options"]:
+                oid = tv.insert(iid, "end", text=str(o["code"]), values=(o["name"], o["values"][0]),
+                                open=True)
+                for extra in o["values"][1:]:
+                    tv.insert(oid, "end", text="", values=("", extra))
+        self.nb.add(f, text=f"DHCPv6 ({len(res['dhcpv6'])})")
+        warns = sum(1 for x in findings if x["level"] == "warn")
+        self.status.set(f"{len(res['routers'])} router(s), {len(res['dhcpv6'])} DHCPv6 repl"
+                        f"{'y' if len(res['dhcpv6']) == 1 else 'ies'}, {warns} warning(s).")
+
     def show_sweep(self, mac, results):
-        self.replies = []
+        self.replies, self.v6_result = [], None
         self.sweep_result = (mac, results)
         self._placeholder()
         self.nb.forget(self.nb.tabs()[0])
@@ -683,6 +809,9 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------ export
     def _export(self, kind):
+        if self.v6_result:
+            return (format_json6(self.v6_result) if kind == "json"
+                    else format_text6(self.v6_result, self.show_raw.get()))
         if self.sweep_result:
             return (format_sweep_json if kind == "json" else format_sweep)(*self.sweep_result)
         if kind == "json":
@@ -690,14 +819,14 @@ class App(tk.Tk):
         return format_text(self.replies, self.show_raw.get(), self.baseline)
 
     def copy_text(self):
-        if not (self.replies or self.sweep_result):
+        if not (self.replies or self.sweep_result or self.v6_result):
             return
         self.clipboard_clear()
         self.clipboard_append(self._export("txt"))
         self.status.set("Copied results to clipboard.")
 
     def save(self, kind):
-        if not (self.replies or self.sweep_result):
+        if not (self.replies or self.sweep_result or self.v6_result):
             messagebox.showinfo(APP, "Nothing to save yet.")
             return
         stem = "dhcp-sweep" if self.sweep_result else "dhcp-options"

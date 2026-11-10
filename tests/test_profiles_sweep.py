@@ -9,9 +9,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 
-from test_features import GOOD, reply  # noqa: E402
-
 from dhcp_options_finder import cli, net, profiles, report  # noqa: E402
+from test_features import GOOD, reply  # noqa: E402
 
 ip = socket.inet_aton
 

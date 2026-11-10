@@ -54,9 +54,9 @@ jobs:
       # Real UDP/68 sockets against a fake server on loopback.
       - name: Loopback integration (Linux/macOS)
         if: runner.os != 'Windows'
-        run: sudo -E DHCPPROBE_LOOPBACK=1 "$(which python)" -m pytest -v tests/test_loopback.py
+        run: sudo -E DHCPPROBE_LOOPBACK=1 "$(which python)" -m pytest -v tests/test_loopback.py tests/test_loopback6.py
       - name: Loopback integration (Windows)
         if: runner.os == 'Windows'
         env:
           DHCPPROBE_LOOPBACK: "1"
-        run: python -m pytest -v tests/test_loopback.py
+        run: python -m pytest -v tests/test_loopback.py tests/test_loopback6.py

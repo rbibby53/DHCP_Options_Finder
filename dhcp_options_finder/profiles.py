@@ -13,7 +13,7 @@ import os
 import sys
 
 FIELDS = ("iface", "mode", "mac", "use_iface_mac", "vendor_class", "hostname", "server",
-          "request", "timeout")
+          "request", "timeout", "family", "v6_ra", "v6_info", "v6_solicit", "v6_pd")
 LAST = "_last"  # reserved key: settings from the most recent probe
 
 
