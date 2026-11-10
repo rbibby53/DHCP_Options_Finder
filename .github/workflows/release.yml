@@ -38,9 +38,9 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           ver=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          code=$(python -c "import dhcpprobe; print(dhcpprobe.__version__)")
+          code=$(python -c "import dhcp_options_finder as p; print(p.__version__)")
           if [ "$ver" != "$code" ]; then
-            echo "::error::pyproject.toml version ($ver) != dhcpprobe.__version__ ($code)"; exit 1
+            echo "::error::pyproject.toml version ($ver) != dhcp_options_finder.__version__ ($code)"; exit 1
           fi
           if ! grep -q "^## \[$ver\]" CHANGELOG.md; then
             echo "::error::CHANGELOG.md has no '## [$ver]' section"; exit 1
@@ -90,7 +90,7 @@ jobs:
         shell: bash
         run: |
           pyinstaller --noconfirm --onefile --windowed --name DHCPOptionsFinder \
-            --icon assets/icon.ico --add-data "assets/icon.png;assets" dhcpprobe_gui.py
+            --icon assets/icon.ico --add-data "dhcp_options_finder/assets/icon.png;dhcp_options_finder/assets" dhcpprobe_gui.py
           pyinstaller --noconfirm --onefile --name dhcpprobe --icon assets/icon.ico dhcpprobe.py
           mkdir out
           cp dist/DHCPOptionsFinder.exe "out/DHCPOptionsFinder-${{ matrix.name }}.exe"
@@ -100,7 +100,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           pyinstaller --noconfirm --windowed --name DHCPOptionsFinder \
-            --icon assets/icon.png --add-data "assets/icon.png:assets" \
+            --icon assets/icon.png --add-data "dhcp_options_finder/assets/icon.png:dhcp_options_finder/assets" \
             --osx-bundle-identifier dev.bibby.dhcpoptionsfinder dhcpprobe_gui.py
           pyinstaller --noconfirm --onefile --name dhcpprobe dhcpprobe.py
           mkdir out
@@ -111,7 +111,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           pyinstaller --noconfirm --onefile --windowed --name DHCPOptionsFinder \
-            --add-data "assets/icon.png:assets" dhcpprobe_gui.py
+            --add-data "dhcp_options_finder/assets/icon.png:dhcp_options_finder/assets" dhcpprobe_gui.py
           pyinstaller --noconfirm --onefile --name dhcpprobe dhcpprobe.py
           mkdir out
           tar -czf "out/DHCPOptionsFinder-${{ matrix.name }}.tar.gz" -C dist DHCPOptionsFinder

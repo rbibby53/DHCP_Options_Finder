@@ -7,12 +7,16 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 tk = pytest.importorskip("tkinter")
-import dhcpprobe_gui as g  # noqa: E402
+from dhcp_options_finder import gui as g  # noqa: E402
 
 
-def test_relaunch_argv_from_source():
+def test_relaunch_argv_uses_launcher(monkeypatch):
+    launcher = os.path.join(os.path.dirname(__file__), "..", "dhcpprobe_gui.py")
+    monkeypatch.setattr(g.sys, "argv", [launcher])
     argv = g._relaunch_argv()
     assert argv[0] == sys.executable and argv[1].endswith("dhcpprobe_gui.py")
+    monkeypatch.setattr(g.sys, "argv", [""])
+    assert g._relaunch_argv() == [sys.executable, "-m", "dhcp_options_finder.gui"]
 
 
 def test_macos_uses_osascript_with_escaped_command(monkeypatch):
