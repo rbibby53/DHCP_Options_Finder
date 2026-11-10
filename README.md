@@ -245,7 +245,7 @@ Baseline comparison works on the raw option bytes and ignores options that legit
 | Windows: nothing back in Discover | Try **Inform**. Its reply is unicast to your IP, which is more likely to reach the app on Windows. |
 | IPv6: `no IPv6 link-local address` | IPv6 is disabled on that interface. |
 | IPv6: no Router Advertisements | IPv6 isn't routed on this segment, or RA Guard on the switch port is dropping them. Routers answer a Router Solicitation right away, so a longer timeout rarely helps. |
-| IPv6 on Windows: routers missing but DHCPv6 works | Windows may not hand Router Advertisements to applications. The rest of the probe still runs, and the checks note that RAs couldn't be read. Please open an issue with the output. |
+| IPv6 on Windows: router details look thinner | Windows never hands Router Advertisements to applications. On Windows the app sends the Router Solicitation, then shows what Windows learned: default routers, Thread/RIO routes, SLAAC prefixes, M/O flags and DNS servers. Raw RA fields such as MTU, RDNSS vs DHCPv6 source, DNSSL and router preference aren't available. |
 
 ## How it works
 

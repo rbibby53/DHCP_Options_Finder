@@ -15,7 +15,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Notes
 - Sweep and baselines are IPv4-only for now.
-- Router Advertisements need a raw socket. They work on Linux and macOS; on Windows, reading RAs may not work on every system, and when it doesn't the probe says so and still runs DHCPv6.
+- Router Advertisements are captured directly on Linux and macOS. Windows never hands RAs to applications, so on Windows the probe sends the Router Solicitation, then reports what Windows learned from the RAs (default routers, routes, SLAAC prefixes, M/O flags, DNS servers), and says so in the output.
 
 
 ## [0.3.0] - 2026-11-10
