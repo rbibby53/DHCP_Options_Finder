@@ -6,7 +6,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import dhcpprobe as d
+from dhcp_options_finder import baseline, checks, cli, net, options, packet, report
 
 ip = socket.inet_aton
 
@@ -21,7 +21,7 @@ def reply(options, yiaddr="10.58.40.242", siaddr="0.0.0.0", mac_source="random",
            + ip(yiaddr) + ip(siaddr) + b"\x00" * 4 + b"\x02" + b"\x00" * 15)
     body = hdr + b"\x00" * 192 + b"\x63\x82\x53\x63"
     body += b"".join(opt(c, v) for c, v in options.items()) + b"\xff"
-    p = d.parse_packet(body)
+    p = packet.parse_packet(body)
     p.update(source="10.58.40.1", mac_source=mac_source, sent_vendor_class=vclass)
     return p
 
@@ -32,11 +32,11 @@ GOOD = {53: b"\x02", 54: ip("10.54.38.12"), 1: ip("255.255.255.0"), 3: ip("10.58
 
 
 def values(p, code):
-    return next(o["values"] for o in d.summarize(p)["options"] if o["code"] == code)
+    return next(o["values"] for o in report.summarize(p)["options"] if o["code"] == code)
 
 
 def findings(p):
-    return {(f["level"], f["option"]) for f in d.check_reply(p)}
+    return {(f["level"], f["option"]) for f in checks.check_reply(p)}
 
 
 # ------------------------------------------------------------ vendor decoders
@@ -77,14 +77,14 @@ def test_reply_option_60_wins_over_sent_class():
 
 
 def test_four_byte_suboption_shows_number_and_ip():
-    assert d._sub_value(b"\x00\x00\x00\x29") == "41 (or IP 0.0.0.41)"
-    assert d._sub_value(ip("10.5.5.5")) == "10.5.5.5 (or 168101125)"
+    assert options._sub_value(b"\x00\x00\x00\x29") == "41 (or IP 0.0.0.41)"
+    assert options._sub_value(ip("10.5.5.5")) == "10.5.5.5 (or 168101125)"
 
 
 # ------------------------------------------------------------ checks
 
 def test_clean_scope_has_no_findings():
-    assert d.check_reply(reply(GOOD)) == []
+    assert checks.check_reply(reply(GOOD)) == []
 
 
 def test_findings_for_real_world_scope():
@@ -104,6 +104,8 @@ def test_addressing_findings():
     assert {("warn", 1), ("warn", 3), ("warn", 6)} <= f
     assert ("warn", None) in findings(reply(GOOD, yiaddr="10.58.40.255"))
     assert ("info", 6) in findings(reply({**GOOD, 6: ip("10.54.38.5")}))
+    # Home/small office: the only resolver is the gateway itself -> not worth flagging
+    assert ("info", 6) not in findings(reply({**GOOD, 6: ip("10.58.40.1")}))
 
 
 def test_timer_and_tftp_findings():
@@ -120,16 +122,16 @@ def test_timer_and_tftp_findings():
 def test_baseline_roundtrip_and_drift(tmp_path):
     base = reply({**GOOD, 44: ip("130.218.123.30")})
     path = tmp_path / "base.json"
-    path.write_text(d.format_json([base]))
-    b = d.load_baseline(str(path))
-    assert d.compare(d.to_record(base), b) == []
+    path.write_text(report.format_json([base]))
+    b = baseline.load_baseline(str(path))
+    assert baseline.compare(report.to_record(base), b) == []
 
     # Server ID / message type differences are ignored; real config changes are not
     now = reply({**GOOD, 54: ip("10.54.38.13"), 6: ip("10.54.38.5") + ip("10.54.38.11"),
                  15: b"kennesaw.edu"})
-    changes = {(c["kind"], c["option"]) for c in d.compare(d.to_record(now), b)}
+    changes = {(c["kind"], c["option"]) for c in baseline.compare(report.to_record(now), b)}
     assert changes == {("changed", 6), ("added", 15), ("removed", 44)}
-    text = d.format_text([now], baseline=b)
+    text = report.format_text([now], baseline=b)
     assert "~   6 DNS Servers: 10.54.38.5, 10.54.38.10 -> 10.54.38.5, 10.54.38.11" in text
     assert "-  44 NetBIOS Name Servers (WINS): was 130.218.123.30  (removed)" in text
 
@@ -138,7 +140,7 @@ def test_load_baseline_rejects_other_json(tmp_path):
     path = tmp_path / "x.json"
     path.write_text('{"hello": 1}')
     try:
-        d.load_baseline(str(path))
+        baseline.load_baseline(str(path))
     except ValueError:
         return
     raise AssertionError("expected ValueError")
@@ -156,30 +158,30 @@ def test_mac_selection(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(d, "_open_socket", lambda iface: FakeSock())
-    monkeypatch.setattr(d.select, "select", lambda *a: ([], [], []))
+    monkeypatch.setattr(net, "_open_socket", lambda iface: FakeSock())
+    monkeypatch.setattr(net.select, "select", lambda *a: ([], [], []))
     iface = {"name": "eth0", "ip": "10.58.40.50", "mac": "3c:22:fb:1a:2b:3c", "up": True}
     real = bytes.fromhex("3c22fb1a2b3c")
 
-    d.probe(iface=iface, mode="discover", timeout=0.01)
+    net.probe(iface=iface, mode="discover", timeout=0.01)
     assert sent["chaddr"] != real and sent["chaddr"][0] == 0x02  # random, locally administered
-    d.probe(iface=iface, mode="discover", timeout=0.01, use_iface_mac=True)
+    net.probe(iface=iface, mode="discover", timeout=0.01, use_iface_mac=True)
     assert sent["chaddr"] == real
-    d.probe(iface=iface, mode="inform", timeout=0.01)
+    net.probe(iface=iface, mode="inform", timeout=0.01)
     assert sent["chaddr"] == real
-    d.probe(iface=iface, mode="discover", timeout=0.01, mac=bytes.fromhex("001122334455"))
+    net.probe(iface=iface, mode="discover", timeout=0.01, mac=bytes.fromhex("001122334455"))
     assert sent["chaddr"] == bytes.fromhex("001122334455")
 
 
 def test_cli_baseline_exit_codes(monkeypatch, tmp_path, capsys):
     current = {"opts": GOOD}
-    monkeypatch.setattr(d, "probe", lambda **kw: [reply(current["opts"])])
+    monkeypatch.setattr(cli, "probe", lambda **kw: [reply(current["opts"])])
     path = str(tmp_path / "b.json")
 
     def run(*args):
         monkeypatch.setattr(sys, "argv", ["dhcpprobe", *args])
         try:
-            d.main()
+            cli.main()
         except SystemExit as e:
             return e.code
         return 0

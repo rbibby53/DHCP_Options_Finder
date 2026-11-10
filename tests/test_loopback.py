@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 
-import dhcpprobe as d
+from dhcp_options_finder import net, report
 from fakeserver import FakeServer
 
 pytestmark = pytest.mark.skipif(os.environ.get("DHCPPROBE_LOOPBACK") != "1",
@@ -25,15 +25,27 @@ def test_probe_loopback(mode):
     srv = FakeServer()
     srv.start()
     iface = {"name": LO, "ip": "127.0.0.1", "mac": "02:aa:bb:cc:dd:ee", "up": True}
-    replies = d.probe(iface=iface, mode=mode, server="127.0.0.1", server_port=srv.port, timeout=5, first=True)
+    replies = net.probe(iface=iface, mode=mode, server="127.0.0.1", server_port=srv.port,
+                        timeout=5, first=True)
     srv.join(5)
     assert len(replies) == 1
-    s = d.summarize(replies[0])
+    s = report.summarize(replies[0])
     assert s["type"] == ("OFFER" if mode == "discover" else "ACK")
     assert any(o["code"] == 43 for o in s["options"])
 
 
 def test_list_interfaces():
-    ifs = d.list_interfaces()
+    ifs = net.list_interfaces()
     assert ifs, "no interfaces found"
-    assert d.default_interface(ifs) is not None
+    assert net.default_interface(ifs) is not None
+
+
+def test_sweep_loopback():
+    srv = FakeServer(replies=2)
+    srv.start()
+    iface = {"name": LO, "ip": "127.0.0.1", "mac": "02:aa:bb:cc:dd:ee", "up": True}
+    mac, results = net.sweep(["", "PXEClient"], iface=iface, server="127.0.0.1",
+                             server_port=srv.port, timeout=5)
+    srv.join(5)
+    assert [len(r) for _, r in results] == [1, 1]
+    assert results[0][1][0]["chaddr"] == results[1][1][0]["chaddr"]  # same MAC for both probes
