@@ -1,9 +1,9 @@
 """Turn parsed replies into summaries, text and JSON."""
 import json
 
-from .baseline import compare, format_change
+from .baseline import BASELINE_IGNORE, compare, format_change
 from .checks import check_reply
-from .options import MSG_TYPES, OPTIONS, _ip, decode
+from .options import MSG_TYPES, OPTIONS, _hex, _ip, decode
 
 
 def option_name(code):
@@ -80,3 +80,64 @@ def format_json(replies, baseline=None):
     if baseline is not None and out:
         out[0]["changes_vs_baseline"] = compare(out[0], baseline)
     return json.dumps(out, indent=2)
+
+
+# ---------------------------------------------------------------- vendor class sweep
+
+SWEEP_IGNORE = BASELINE_IGNORE | {60}  # servers often echo the class back
+
+
+def sweep_summary(results):
+    """Compare each vendor class's reply with the reference (no option 60, else first reply)."""
+    answered = [(vc, r) for vc, r in results if r]
+    ref_vc, ref = next(((vc, r) for vc, r in answered if not vc), answered[0] if answered else (None, None))
+    ref_rec = to_record(ref[0]) if ref else None
+    rows = []
+    for vc, replies in results:
+        row = {"vendor_class": vc, "replies": [to_record(p) for p in replies], "changes": []}
+        if not replies:
+            row["status"] = "no reply"
+        elif vc == ref_vc:
+            row["status"] = "reference"
+        else:
+            rec = row["replies"][0]
+            row["changes"] = compare(rec, ref_rec, SWEEP_IGNORE)
+            if rec["yiaddr"] != ref_rec["yiaddr"] and "0.0.0.0" not in (rec["yiaddr"], ref_rec["yiaddr"]):
+                row["changes"].insert(0, {"kind": "changed", "option": None, "name": "Offered IP (yiaddr)",
+                                          "was": ref_rec["yiaddr"], "now": rec["yiaddr"]})
+            row["status"] = "differs" if row["changes"] else "same"
+        rows.append(row)
+    return {"reference": ref_vc, "rows": rows}
+
+
+def _label(vc):
+    return vc if vc else "(none)"
+
+
+def format_sweep(mac, results):
+    s = sweep_summary(results)
+    lines = [f"Vendor class sweep: {len(results)} probes, client MAC {_hex(mac)} for every probe", ""]
+    width = max(len(_label(r["vendor_class"])) for r in s["rows"]) + 2
+    for r in s["rows"]:
+        name = _label(r["vendor_class"]).ljust(width)
+        if r["status"] == "reference":
+            rec = r["replies"][0]
+            lines.append(f"  {name}reference: {len(rec['options'])} options from "
+                         f"{rec['server_id'] or rec['source']}")
+        elif r["status"] == "no reply":
+            lines.append(f"  {name}no reply")
+        elif r["status"] == "same":
+            lines.append(f"  {name}same as reference")
+        else:
+            lines.append(f"  {name}{format_change(r['changes'][0])}")
+            lines += [f"  {' ' * width}{format_change(c)}" for c in r["changes"][1:]]
+    if s["reference"] is None:
+        lines.append("\nNo replies to any probe.")
+    elif s["reference"]:
+        lines.append(f"\nNo reply without option 60, so {s['reference']!r} is the reference.")
+    return "\n".join(lines)
+
+
+def format_sweep_json(mac, results):
+    s = sweep_summary(results)
+    return json.dumps({"mac": _hex(mac), "reference": s["reference"], "results": s["rows"]}, indent=2)

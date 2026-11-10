@@ -62,6 +62,9 @@ OPTIONS = {
     249: ("MS Classless Static Routes", "cidr"), 252: ("WPAD URL", "str"),
 }
 
+# Vendor classes (option 60) offered as presets and used by the sweep. "" = no option 60.
+VENDOR_CLASS_PRESETS = ["", "OptiIpPhone", "Cisco AP c9130", "ubnt", "ArubaAP", "PXEClient", "MSFT 5.0"]
+
 OPT82_SUB = {1: "Circuit-ID", 2: "Remote-ID", 5: "Link Selection",
              9: "Vendor-Specific", 11: "Server ID Override", 151: "VSS", 152: "VSS Control"}
 

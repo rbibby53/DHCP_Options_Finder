@@ -225,3 +225,24 @@ def probe(iface=None, mode="discover", mac=None, vendor_class=None, hostname=Non
     finally:
         s.close()
     return replies
+
+
+def sweep(vendor_classes, iface=None, mac=None, use_iface_mac=False, progress=None, **kw):
+    """Probe once per vendor class, all with the same client MAC, so option 60 is the only
+    thing that differs between requests. Returns (mac, [(vendor_class, replies), ...])."""
+    if isinstance(iface, str):
+        iface = get_interface(iface)
+    iface = iface or default_interface()
+    if not iface:
+        raise ProbeError("No usable network interface found.")
+    if use_iface_mac:
+        mac = bytes.fromhex(iface["mac"].replace(":", ""))
+    mac = mac or parse_mac("random")
+    kw.pop("vendor_class", None)
+    kw.setdefault("first", True)
+    results = []
+    for n, vc in enumerate(vendor_classes, 1):
+        if progress:
+            progress(n, len(vendor_classes), vc)
+        results.append((vc, probe(iface=iface, mac=mac, vendor_class=vc or None, **kw)))
+    return mac, results

@@ -16,13 +16,15 @@ def load_baseline(path):
 
 def _val(o):
     v = o.get("value", "")
-    return ", ".join(v) if isinstance(v, list) else str(v)
+    if isinstance(v, list):
+        return ", ".join(x for x in v if not str(x).startswith("raw: 0x"))
+    return str(v)
 
 
-def compare(record, baseline):
+def compare(record, baseline, ignore=BASELINE_IGNORE):
     """Differences between a reply record and a baseline record, compared on raw bytes."""
-    cur = {o["code"]: o for o in record["options"] if o["code"] not in BASELINE_IGNORE}
-    old = {o["code"]: o for o in baseline["options"] if o["code"] not in BASELINE_IGNORE}
+    cur = {o["code"]: o for o in record["options"] if o["code"] not in ignore}
+    old = {o["code"]: o for o in baseline["options"] if o["code"] not in ignore}
     changes = []
     for c in sorted(set(cur) | set(old)):
         if c not in old:

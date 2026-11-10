@@ -38,3 +38,14 @@ def test_list_interfaces():
     ifs = net.list_interfaces()
     assert ifs, "no interfaces found"
     assert net.default_interface(ifs) is not None
+
+
+def test_sweep_loopback():
+    srv = FakeServer(replies=2)
+    srv.start()
+    iface = {"name": LO, "ip": "127.0.0.1", "mac": "02:aa:bb:cc:dd:ee", "up": True}
+    mac, results = net.sweep(["", "PXEClient"], iface=iface, server="127.0.0.1",
+                             server_port=srv.port, timeout=5)
+    srv.join(5)
+    assert [len(r) for _, r in results] == [1, 1]
+    assert results[0][1][0]["chaddr"] == results[1][1][0]["chaddr"]  # same MAC for both probes
