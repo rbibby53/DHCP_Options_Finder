@@ -129,8 +129,10 @@ def format_sweep(mac, results):
         elif r["status"] == "same":
             lines.append(f"  {name}same as reference")
         else:
-            lines.append(f"  {name}{format_change(r['changes'][0])}")
-            lines += [f"  {' ' * width}{format_change(c)}" for c in r["changes"][1:]]
+            fmt = [format_change(c, added="only this class", removed="not sent to this class")
+                   for c in r["changes"]]
+            lines.append(f"  {name}{fmt[0]}")
+            lines += [f"  {' ' * width}{x}" for x in fmt[1:]]
     if s["reference"] is None:
         lines.append("\nNo replies to any probe.")
     elif s["reference"]:

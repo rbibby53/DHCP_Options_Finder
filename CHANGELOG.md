@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-10
+
+### Added
+- **Vendor class sweep:** probe once per vendor class (Siemens/Unify, Cisco AP, UniFi, Aruba, PXE, Microsoft, plus custom classes), all with the same MAC, and see which options each class gets. **Sweep Vendor Classes** in the GUI; `--sweep` / `--sweep-classes` in the CLI, with text or JSON output.
+- **Profiles:** save named settings and reuse them. The GUI restores your last settings on launch; the CLI has `--profile`, `--save-profile`, `--list-profiles` and `--delete-profile`. Profiles stay in your user folder and owned by you, even under sudo or the GUI's admin relaunch.
+- **pipx install:** `pipx install git+https://github.com/rbibby53/DHCP_Options_Finder.git` gives you `dhcpprobe` and `dhcp-options-finder` commands. Releases also attach the wheel.
+- **macOS signing and notarization** in the release workflow, enabled once the Apple secrets are added (see `docs/macos-signing.md`).
+- **Build provenance attestations** for every release file (`gh attestation verify`).
+
+### Changed
+- The "only one DNS server" check no longer fires when that server is the gateway itself (the usual home and small-office setup).
+- The NTP check explains that it matters for devices on isolated VLANs.
+- The GUI no longer repeats option 43 raw hex as a row; it's in the Raw (hex) column.
+- The engine is now a package, `dhcp_options_finder`. `dhcpprobe.py` and `dhcpprobe_gui.py` still work from a checkout.
+- Release workflow: actions pinned to commit SHAs, read-only token by default, with write access only for the publish job.
+
+
 ## [0.2.0] - 2026-11-09
 
 ### Added
@@ -38,6 +55,7 @@ First release.
 - Running from source needs Python 3.11 or newer.
 - The Linux build needs glibc 2.39+ (Fedora 40+, Ubuntu 24.04+, Debian 13, RHEL 10).
 
-[Unreleased]: https://github.com/rbibby53/DHCP_Options_Finder/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/rbibby53/DHCP_Options_Finder/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/rbibby53/DHCP_Options_Finder/releases/tag/v0.3.0
 [0.2.0]: https://github.com/rbibby53/DHCP_Options_Finder/releases/tag/v0.2.0
 [0.1.0]: https://github.com/rbibby53/DHCP_Options_Finder/releases/tag/v0.1.0

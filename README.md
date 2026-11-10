@@ -36,10 +36,12 @@ Checking what a scope delivers usually means a packet capture or logging into th
 - **Asks for everything.** Requests all 254 option codes, so servers that only return what's requested still show their full config.
 - **Sees every server.** Collects every reply in the window and warns when more than one DHCP server answers (possible rogue).
 - **Impersonates a device.** Set the client MAC and vendor class (option 60) to see reservation- and class-specific options, e.g. option 43 for a particular AP or controller.
+- **Sweeps vendor classes.** One click probes as a Siemens phone, a Cisco AP, UniFi, Aruba, PXE and a Windows client, all with the same MAC, and shows exactly which options each class gets.
 - **Knows the vendor formats.** Option 43 is decoded for Siemens/Unify phones (voice VLAN, DLS server), Cisco APs (WLC list), UniFi (controller), Aruba and Microsoft. Anything else falls back to sub-options, text or hex.
 - **Checks the config.** Flags likely mistakes: router outside the subnet, mismatched broadcast address, missing DNS or NTP, out-of-order renewal timers, conflicting TFTP servers, leftover WINS.
 - **Spots drift.** Save a known-good scope as a baseline; later probes show exactly what changed.
 - **Decodes the hard ones:** 82 relay info, 119 domain search (with compression), 121/249 classless routes, 125 vendor-identifying info, option overload (52) and RFC 3396 split options.
+- **Remembers your setups.** Save named profiles (interface, vendor class, MAC…); the last settings come back on launch.
 - **Exports** to text or JSON, or copies selected rows to the clipboard.
 
 ## Quick start
@@ -54,12 +56,28 @@ Grab the build for your OS from the **[latest release](https://github.com/rbibby
 | macOS (Apple silicon) | `DHCPOptionsFinder-macos-arm64.zip` | Unzip and open. If it needs admin rights, it asks for your password and relaunches |
 | Linux | `DHCPOptionsFinder-linux-x64.tar.gz` | `tar xzf …` then `sudo ./DHCPOptionsFinder` (glibc 2.39+: Fedora 40+, Ubuntu 24.04+, Debian 13, RHEL 10) |
 
-CLI-only builds (`dhcpprobe-cli-*`) and `SHA256SUMS.txt` are attached to every release.
+CLI-only builds (`dhcpprobe-cli-*`), a Python wheel and `SHA256SUMS.txt` are attached to every release. Every file also has a signed build-provenance attestation, so you can check it was built by this repo's release workflow:
+
+```bash
+gh attestation verify DHCPOptionsFinder-macos-arm64.zip -R rbibby53/DHCP_Options_Finder
+```
 
 Intel Macs are no longer supported. The last Intel build is in [v0.1.0](https://github.com/rbibby53/DHCP_Options_Finder/releases/tag/v0.1.0); running [from source](#from-source) still works.
 
 > [!NOTE]
-> Builds are not code-signed yet. On macOS, if Gatekeeper blocks the app: right-click, then **Open**, or run `xattr -dr com.apple.quarantine DHCPOptionsFinder.app`. On Windows, SmartScreen will warn: click **More info**, then **Run anyway**.
+> Once signing is set up ([docs/macos-signing.md](docs/macos-signing.md)), the macOS app is signed with a Developer ID and notarized by Apple, and each release's notes say whether it is. An unsigned Mac build that Gatekeeper blocks can still be opened: right-click it, then **Open**, or run `xattr -dr com.apple.quarantine DHCPOptionsFinder.app`. Windows builds are unsigned, so SmartScreen will warn: click **More info**, then **Run anyway**.
+
+### With pipx
+
+Installs the `dhcpprobe` command and the `dhcp-options-finder` GUI into their own environment:
+
+```bash
+pipx install git+https://github.com/rbibby53/DHCP_Options_Finder.git
+sudo "$(command -v dhcpprobe)" --list     # sudo doesn't search ~/.local/bin, so pass the full path
+sudo -E "$(command -v dhcp-options-finder)"
+```
+
+Upgrade with `pipx upgrade dhcp-options-finder`.
 
 ### From source
 
@@ -70,7 +88,7 @@ pip install -r requirements.txt
 sudo python3 dhcpprobe_gui.py      # Windows: py dhcpprobe_gui.py
 ```
 
-You need Python 3.11+ with Tkinter (Fedora: `sudo dnf install python3-tkinter`, Debian/Ubuntu: `sudo apt install python3-tk`, Homebrew: `brew install python-tk`).
+Either way you need Python 3.11+ with Tkinter (Fedora: `sudo dnf install python3-tkinter`, Debian/Ubuntu: `sudo apt install python3-tk`, Homebrew: `brew install python-tk`).
 
 ### Using it
 
@@ -80,7 +98,12 @@ You need Python 3.11+ with Tkinter (Fedora: `sudo dnf install python3-tkinter`, 
    - **Inform** shows the config for a host that already has an IP. No address is offered, but options are.
 3. Optionally set a **Client MAC** (a device's real MAC, to see its reservation) and a **Vendor class** (e.g. `OptiIpPhone`, `PXEClient`, your AP's class string). With the MAC blank, Discover uses a random MAC so an existing lease on your computer doesn't skew the answer. Tick **Use this computer's MAC** to send yours instead.
 4. Click **Run Probe**. Each reply gets its own tab, with config checks at the top. Double-click a row for the full value, and tick **Show raw hex** to see the bytes.
-5. To track changes, **Save JSON…** a known-good result, then later click **Compare to Baseline…** and pick that file. Changed options are highlighted and listed above the table.
+5. To find out which device types get special options, click **Sweep Vendor Classes**. It probes once per preset class, plus any custom class you typed, all with the same MAC. The **Sweep** tab lists what each class gets that the others don't; double-click a class to open its full reply.
+
+   <img src="docs/sweep.png" width="720" alt="Vendor class sweep showing which options each class receives">
+
+6. To track changes, **Save JSON…** a known-good result, then later click **Compare to Baseline…** and pick that file. Changed options are highlighted and listed above the table.
+7. **Profile → Save As…** stores the current settings under a name, e.g. "Siemens phone" or "AP VLAN". Your last settings are also restored automatically. Profiles live in your user folder (`%APPDATA%`, `~/Library/Application Support` or `~/.config`), even when the app runs as administrator.
 
 ## CLI
 
@@ -98,6 +121,11 @@ sudo python3 dhcpprobe.py -i eth0 -s 10.20.30.1              # unicast to one se
 sudo python3 dhcpprobe.py -i eth0 -j > options.json          # JSON for scripts (includes checks)
 sudo python3 dhcpprobe.py -i eth0 --save-baseline bas.json   # record a known-good scope
 sudo python3 dhcpprobe.py -i eth0 --baseline bas.json        # compare; exit 3 if anything changed
+sudo python3 dhcpprobe.py -i eth0 --sweep                    # which options each vendor class gets
+sudo python3 dhcpprobe.py -i eth0 --sweep-classes ",OptiIpPhone,Mitel"  # sweep your own list ('' = none)
+sudo python3 dhcpprobe.py -i eth1 -V OptiIpPhone --save-profile phones  # remember these settings
+sudo python3 dhcpprobe.py -p phones                          # reuse them (flags still override)
+sudo python3 dhcpprobe.py --list-profiles
 ```
 
 <details>
@@ -134,6 +162,23 @@ sudo python3 dhcpprobe.py -i eth0 --baseline bas.json        # compare; exit 3 i
 ```
 </details>
 
+<details>
+<summary>Example sweep</summary>
+
+```text
+Vendor class sweep: 7 probes, client MAC 02:a1:b2:c3:d4:e5 for every probe
+
+  (none)          reference: 8 options from 10.20.0.12
+  OptiIpPhone     +  43 Vendor Specific Info: Siemens/Unify phone provisioning, Vendor tag: Siemens, Voice VLAN ID: 41  (only this class)
+  Cisco AP c9130  +  43 Vendor Specific Info: Cisco AP controller list, WLC: 10.20.0.5  (only this class)
+  ubnt            no reply
+  ArubaAP         no reply
+  PXEClient       +  66 TFTP Server Name: 10.20.0.40  (only this class)
+                  +  67 Bootfile Name: ipxe.efi  (only this class)
+  MSFT 5.0        same as reference
+```
+</details>
+
 Run `python3 dhcpprobe.py --help` for every flag. Exit codes: `0` a server replied, `1` no replies, `3` the reply differs from `--baseline`. That makes it usable from a scheduled job or monitoring system to catch scope changes.
 
 Baseline comparison works on the raw option bytes and ignores options that legitimately vary between probes: the requested IP (50), message type (53), server identifier (54, so failover partners don't count as drift), client ID (61) and relay agent info (82).
@@ -162,6 +207,19 @@ sudo -E DHCPPROBE_LOOPBACK=1 python3 -m pytest tests/test_loopback.py   # real s
 ```
 
 CI runs lint plus unit and loopback tests on Windows, macOS and Linux against Python 3.11 (oldest supported) and 3.15 (latest). Release builds use Python 3.15.
+
+Code layout (`dhcp_options_finder/`):
+
+| Module | Does |
+|---|---|
+| `options.py` | Option table, decoders, vendor option 43 layouts, vendor class presets |
+| `packet.py` | Build requests, parse replies (overload, RFC 3396) |
+| `net.py` | Interfaces, per-OS sockets, `probe()` and `sweep()` |
+| `checks.py` | Config checks |
+| `baseline.py` | Baseline load and compare |
+| `report.py` | Summaries, text/JSON output, sweep reports |
+| `profiles.py` | Saved profiles and last-used settings |
+| `cli.py`, `gui.py` | The two front ends |
 
 ### Releasing
 

@@ -42,10 +42,10 @@ def compare(record, baseline, ignore=BASELINE_IGNORE):
     return changes
 
 
-def format_change(c):
+def format_change(c, added="new", removed="removed"):
     code = f"{c['option']:>3} " if c["option"] is not None else "    "
     if c["kind"] == "added":
-        return f"+ {code}{c['name']}: {c['now']}  (new)"
+        return f"+ {code}{c['name']}: {c['now']}  ({added})"
     if c["kind"] == "removed":
-        return f"- {code}{c['name']}: was {c['was']}  (removed)"
+        return f"- {code}{c['name']}: was {c['was']}  ({removed})"
     return f"~ {code}{c['name']}: {c['was']} -> {c['now']}"
