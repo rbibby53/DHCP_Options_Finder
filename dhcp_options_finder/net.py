@@ -26,18 +26,21 @@ def _psutil():
 
 
 def list_interfaces():
-    """[{name, ip, mac, up}] for interfaces that have an IPv4 address or a MAC."""
+    """[{name, ip, ip6ll, mac, up}] for interfaces that have a MAC (ip6ll = IPv6 link-local)."""
     ps = _psutil()
     out = []
     if ps:
         stats = ps.net_if_stats()
         for name, addrs in ps.net_if_addrs().items():
             ip = next((a.address for a in addrs if a.family == socket.AF_INET), None)
+            ll = next((a.address for a in addrs if getattr(socket, "AF_INET6", None) == a.family
+                       and a.address.lower().startswith("fe80")), None)
             mac = next((a.address for a in addrs if a.family == ps.AF_LINK), None)
             mac = mac.replace("-", ":").lower() if mac else None
             if not mac or mac == "00:00:00:00:00:00":
                 continue  # loopback/tunnels: no L2 to DHCP on
-            out.append({"name": name, "ip": ip, "mac": mac,
+            out.append({"name": name, "ip": ip, "ip6ll": ll.split("%")[0] if ll else None,
+                        "ip6ll_scope": ll.split("%")[1] if ll and "%" in ll else None, "mac": mac,
                         "up": bool(stats.get(name) and stats[name].isup)})
     elif sys.platform.startswith("linux"):
         for name in sorted(os.listdir("/sys/class/net")):
@@ -48,7 +51,8 @@ def list_interfaces():
             if mac in ("", "00:00:00:00:00:00"):
                 continue
             state = _read(f"/sys/class/net/{name}/operstate")
-            out.append({"name": name, "ip": _linux_iface_ip(name), "mac": mac, "up": state == "up"})
+            out.append({"name": name, "ip": _linux_iface_ip(name), "ip6ll": _linux_ll(name),
+                        "ip6ll_scope": None, "mac": mac, "up": state == "up"})
     else:
         raise ProbeError("psutil is required on this platform:  pip install psutil")
     return out
@@ -57,6 +61,19 @@ def list_interfaces():
 def _read(path):
     with open(path) as f:
         return f.read().strip()
+
+
+def _linux_ll(iface):
+    """IPv6 link-local address from /proc/net/if_inet6 (no psutil)."""
+    try:
+        with open("/proc/net/if_inet6") as f:
+            for line in f:
+                hexaddr, _idx, _plen, scope, _flags, name = line.split()
+                if name == iface and scope == "20":  # 0x20 = link scope
+                    return str(__import__("ipaddress").IPv6Address(bytes.fromhex(hexaddr)))
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def _linux_iface_ip(iface):
