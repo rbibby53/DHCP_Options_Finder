@@ -108,8 +108,9 @@ def describe(ra):
                              ("Other config (O): use DHCPv6 for DNS etc.", ra["other"])) if on]
     life = ra["router_lifetime"]
     rows = [("Default router", f"yes, lifetime {_fmt_time(life)}, preference {ra['preference']}"
-             if life else "no (lifetime 0: advertises routes/prefixes only)"),
-            ("Flags", "; ".join(flags) or "none (SLAAC only, no DHCPv6)")]
+             if life else "no (lifetime 0: advertises routes/prefixes only)")]
+    if life or flags:  # flags only matter coming from a default router
+        rows.append(("Flags", "; ".join(flags) or "none (SLAAC only, no DHCPv6)"))
     if ra["mac"]:
         rows.append(("Router MAC", ra["mac"]))
     for p in ra["prefixes"]:

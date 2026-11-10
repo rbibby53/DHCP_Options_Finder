@@ -34,6 +34,13 @@ def iface_index(iface):
         raise ProbeError(f"No interface index for {iface['name']!r}: {e}") from e
 
 
+def _addr(host, port, idx):
+    """Socket address; the interface index only belongs on link-local/multicast addresses
+    (Windows rejects a scope on e.g. ::1 or a global address with WSAEADDRNOTAVAIL)."""
+    scoped = host.lower().startswith(("fe80", "ff02"))
+    return (host, port, 0, idx if scoped else 0)
+
+
 def _resolve(iface):
     if isinstance(iface, str):
         iface = get_interface(iface)
@@ -81,11 +88,10 @@ def ra_probe(iface=None, timeout=5.0, solicit=True, rs_dest=ra.ALL_ROUTERS, log=
                          (socket.IPV6_UNICAST_HOPS, 255)):
             s.setsockopt(socket.IPPROTO_IPV6, opt, val)
         if os.name == "nt":  # Windows raw sockets must be bound before receiving
-            s.bind((iface["ip6ll"], 0, 0, idx))
+            s.bind(_addr(iface["ip6ll"], 0, idx))
         if solicit:
             mac = bytes.fromhex(iface["mac"].replace(":", "")) if iface.get("mac") else None
-            scope = idx if rs_dest.lower().startswith(("ff02", "fe80")) else 0
-            s.sendto(ra.build_rs(iface["ip6ll"], mac), (rs_dest, 0, 0, scope))
+            s.sendto(ra.build_rs(iface["ip6ll"], mac), _addr(rs_dest, 0, idx))
             log(f"Sent Router Solicitation on {iface['name']}; listening {timeout:g}s")
         routers, deadline = {}, time.monotonic() + timeout
         while (left := deadline - time.monotonic()) > 0:
@@ -129,7 +135,7 @@ def dhcpv6_probe(iface=None, info=True, solicit=True, pd=False, mac=None, use_if
         _bind_device(s, iface)
         s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, idx)
         try:
-            s.bind((iface["ip6ll"], dhcpv6.CLIENT_PORT, 0, idx) if os.name == "nt"
+            s.bind(_addr(iface["ip6ll"], dhcpv6.CLIENT_PORT, idx) if os.name == "nt"
                    else ("::", dhcpv6.CLIENT_PORT))
         except PermissionError as e:
             raise _perm(e) from None
@@ -137,7 +143,6 @@ def dhcpv6_probe(iface=None, info=True, solicit=True, pd=False, mac=None, use_if
             raise ProbeError(f"Can't bind UDP/546 ({e}). Another DHCPv6 client may own the port.") from e
 
         dest = server or dhcpv6.ALL_SERVERS
-        scope = idx if dest.lower().startswith(("ff02", "fe80")) else 0
         pending = {}
         for kind, on in (("information-request", info), ("solicit", solicit)):
             if not on:
@@ -145,7 +150,7 @@ def dhcpv6_probe(iface=None, info=True, solicit=True, pd=False, mac=None, use_if
             xid = random.getrandbits(24)
             msg_type = dhcpv6.INFORMATION_REQUEST if kind == "information-request" else dhcpv6.SOLICIT
             pkt = dhcpv6.build(msg_type, xid, duid, ia_na=kind == "solicit", ia_pd=kind == "solicit" and pd)
-            s.sendto(pkt, (dest, server_port, 0, scope))
+            s.sendto(pkt, _addr(dest, server_port, idx))
             pending[xid] = kind
         log(f"Sent DHCPv6 {', '.join(pending.values())} on {iface['name']} to {dest}; "
             f"listening {timeout:g}s")

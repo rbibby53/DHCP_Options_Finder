@@ -183,3 +183,39 @@ def test_text_and_json_output():
     j = json.loads(report6.format_json6(res))
     assert j["family"] == "ipv6" and j["routers"][0]["rdnss"][0]["server"] == "2001:db8:1::1"
     assert j["dhcpv6"][0]["options"][2]["name"] == "DNS Servers"
+
+
+# ------------------------------------------------------------ sockets & CLI (no network)
+
+def test_scope_only_on_link_local():
+    from dhcp_options_finder import net6
+    assert net6._addr("fe80::1", 546, 7) == ("fe80::1", 546, 0, 7)
+    assert net6._addr("ff02::1:2", 547, 7) == ("ff02::1:2", 547, 0, 7)
+    assert net6._addr("::1", 546, 7) == ("::1", 546, 0, 0)
+    assert net6._addr("2001:db8::1", 547, 7) == ("2001:db8::1", 547, 0, 0)
+
+
+def test_cli_ipv6(monkeypatch, capsys):
+    from dhcp_options_finder import cli
+    seen = {}
+
+    def fake_probe6(**kw):
+        seen.update(kw)
+        return result([("fe80::1", HOME_RA)], [info_reply()])
+
+    monkeypatch.setattr(cli, "probe6", fake_probe6)
+    monkeypatch.setattr(sys, "argv", ["dhcpprobe", "-6", "--no-solicit", "--pd", "-t", "2"])
+    try:
+        cli.main()
+    except SystemExit as e:
+        assert e.code == 0
+    out = capsys.readouterr().out
+    assert "=== Router Advertisements: 1 router(s) ===" in out
+    assert seen["solicit"] is False and seen["info"] is True and seen["pd"] is True
+    assert seen["server_port"] == 547 and seen["timeout"] == 2.0
+
+    monkeypatch.setattr(sys, "argv", ["dhcpprobe", "-6", "--sweep"])
+    try:
+        cli.main()
+    except SystemExit as e:
+        assert "IPv4-only" in str(e.code)
